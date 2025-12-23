@@ -1,0 +1,182 @@
+"""
+=============================================================================
+DATABASE CONFIGURATION
+=============================================================================
+
+PURPOSE:
+    Configures the database connection and session management.
+    Provides utilities for database operations.
+
+FEATURES:
+    - SQLAlchemy engine configuration
+    - Session factory with proper cleanup
+    - Dependency injection for FastAPI
+    - Connection health checking
+
+USAGE:
+    from app.database import get_db, engine
+    
+    # In FastAPI route with dependency injection
+    @app.get("/users")
+    async def get_users(db: Session = Depends(get_db)):
+        return db.query(User).all()
+
+AUTHOR: SmartCareer AI Team
+VERSION: 1.0.0
+"""
+
+# =============================================================================
+# IMPORTS
+# =============================================================================
+
+from typing import Generator
+import logging
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import QueuePool
+
+from app.config import settings
+from app.models.base import Base
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+
+logger = logging.getLogger(__name__)
+
+# =============================================================================
+# ENGINE CONFIGURATION
+# =============================================================================
+
+# Create SQLAlchemy engine
+# WHY these settings?
+# - pool_size: Number of connections to keep open
+# - max_overflow: Extra connections if pool is full
+# - pool_timeout: Seconds to wait for available connection
+# - pool_recycle: Recreate connections after this many seconds (prevents stale)
+# - echo: Log all SQL queries (useful for debugging)
+
+# Check if using SQLite (doesn't support connection pooling)
+if settings.DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(
+        settings.DATABASE_URL,
+        connect_args={"check_same_thread": False},
+        echo=settings.DEBUG,
+    )
+else:
+    engine = create_engine(
+        settings.DATABASE_URL,
+        poolclass=QueuePool,
+        pool_size=5,
+        max_overflow=10,
+        pool_timeout=30,
+        pool_recycle=1800,  # 30 minutes
+        echo=settings.DEBUG,  # Log SQL in debug mode
+    )
+
+# =============================================================================
+# SESSION FACTORY
+# =============================================================================
+
+# Create session factory
+# WHY a factory?
+# - Creates new sessions with consistent configuration
+# - Each request gets its own session
+# - Proper isolation between requests
+
+SessionLocal = sessionmaker(
+    autocommit=False,   # Manual commit required
+    autoflush=False,    # Don't auto-flush before queries
+    bind=engine
+)
+
+# =============================================================================
+# DEPENDENCY INJECTION
+# =============================================================================
+
+def get_db() -> Generator[Session, None, None]:
+    """
+    Get database session for dependency injection.
+    
+    USAGE in FastAPI:
+        @app.get("/users")
+        def get_users(db: Session = Depends(get_db)):
+            return db.query(User).all()
+    
+    WHY a generator?
+    - Ensures session is closed after request
+    - Works with FastAPI's dependency system
+    - Automatic cleanup on errors
+    
+    Yields:
+        SQLAlchemy Session object
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def create_tables() -> None:
+    """
+    Create all database tables.
+    
+    Uses SQLAlchemy's create_all which is idempotent
+    (won't fail if tables exist).
+    
+    NOTE: In production, use Alembic migrations instead.
+    """
+    logger.info("Creating database tables...")
+    Base.metadata.create_all(bind=engine)
+    logger.info("Database tables created successfully!")
+
+
+def drop_tables() -> None:
+    """
+    Drop all database tables.
+    
+    ⚠️ WARNING: This destroys all data!
+    Only use in development/testing.
+    """
+    logger.warning("Dropping all database tables!")
+    Base.metadata.drop_all(bind=engine)
+    logger.info("All tables dropped.")
+
+
+def check_database_connection() -> bool:
+    """
+    Check if database connection is working.
+    
+    Returns:
+        True if connection successful, False otherwise
+    """
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        logger.info("Database connection successful!")
+        return True
+    except Exception as e:
+        logger.error(f"Database connection failed: {e}")
+        return False
+
+
+def get_db_info() -> dict:
+    """
+    Get database information for debugging.
+    
+    Returns:
+        Dictionary with database info
+    """
+    return {
+        "url": settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "hidden",
+        "pool_size": engine.pool.size(),
+        "checked_out": engine.pool.checkedout(),
+        "overflow": engine.pool.overflow(),
+        "checkedin": engine.pool.checkedin(),
+    }

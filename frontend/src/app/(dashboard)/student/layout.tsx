@@ -1,0 +1,468 @@
+/**
+ * =============================================================================
+ * STUDENT DASHBOARD LAYOUT
+ * =============================================================================
+ *
+ * Features:
+ * - Sidebar navigation (Dashboard, Resumes, Jobs, Applications, Settings)
+ * - Top navbar with search, notifications, user avatar
+ * - Responsive with mobile drawer
+ */
+
+"use client";
+
+import { useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  LayoutDashboard,
+  FileText,
+  Briefcase,
+  Send,
+  Settings,
+  Search,
+  Bell,
+  ChevronDown,
+  LogOut,
+  User,
+  Menu,
+  X,
+  Sparkles,
+  HelpCircle,
+  Moon,
+  Sun,
+  ChevronRight,
+  GraduationCap,
+} from "lucide-react";
+import { useAuth } from "@/hooks/useAuth";
+import { useTranslation } from "@/hooks/useTranslation";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Avatar } from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
+import { LanguageSwitcher } from "@/components/ui/language-switcher";
+import { cn } from "@/lib/utils";
+
+// =============================================================================
+// NAVIGATION CONFIG (will be translated in component)
+// =============================================================================
+
+const getNavigation = (t: (key: string) => string) => [
+  {
+    name: t("dashboard.sidebar.dashboard"),
+    href: "/student",
+    icon: LayoutDashboard,
+    exact: true,
+  },
+  {
+    name: t("dashboard.sidebar.myResumes"),
+    href: "/student/resumes",
+    icon: FileText,
+    badge: "3",
+  },
+  {
+    name: t("dashboard.sidebar.findJobs"),
+    href: "/student/jobs",
+    icon: Briefcase,
+    badge: t("dashboard.sidebar.new"),
+    badgeColor: "success",
+  },
+  {
+    name: t("dashboard.sidebar.universities"),
+    href: "/student/universities",
+    icon: GraduationCap,
+    badge: t("dashboard.sidebar.ai"),
+    badgeColor: "success",
+  },
+  {
+    name: t("dashboard.sidebar.myApplications"),
+    href: "/student/applications",
+    icon: Send,
+    badge: "2",
+    badgeColor: "warning",
+  },
+  {
+    name: t("dashboard.settings.title"),
+    href: "/student/settings",
+    icon: Settings,
+  },
+];
+
+const getQuickActions = (t: (key: string) => string) => [
+  {
+    name: t("dashboard.sidebar.createAIResume"),
+    href: "/student/resumes/create-ai",
+    icon: Sparkles,
+    color: "from-purple-500 to-indigo-600",
+  },
+];
+
+// =============================================================================
+// MOCK NOTIFICATIONS
+// =============================================================================
+
+const notifications = [
+  {
+    id: 1,
+    title: "Interview Scheduled",
+    message: "Your interview with Click.uz is tomorrow at 10 AM",
+    time: "2 hours ago",
+    unread: true,
+  },
+  {
+    id: 2,
+    title: "Application Viewed",
+    message: "EPAM viewed your application for Senior Developer",
+    time: "5 hours ago",
+    unread: true,
+  },
+  {
+    id: 3,
+    title: "Resume Tip",
+    message: "Add more skills to improve your ATS score",
+    time: "1 day ago",
+    unread: false,
+  },
+];
+
+// =============================================================================
+// MAIN LAYOUT
+// =============================================================================
+
+export default function StudentDashboardLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const pathname = usePathname();
+  const { t } = useTranslation();
+  const { user, logout } = useAuth();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [isDark, setIsDark] = useState(false);
+
+  const unreadCount = notifications.filter((n) => n.unread).length;
+
+  // Get translated navigation items
+  const navigation = getNavigation(t);
+  const quickActions = getQuickActions(t);
+
+  const isActive = (href: string, exact?: boolean) => {
+    if (exact) return pathname === href;
+    return pathname.startsWith(href);
+  };
+
+  return (
+    <div className="flex h-screen bg-surface-50 dark:bg-surface-900">
+      {/* Mobile sidebar backdrop */}
+      <AnimatePresence>
+        {sidebarOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setSidebarOpen(false)}
+            className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm lg:hidden"
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Sidebar */}
+      <aside
+        className={cn(
+          "fixed inset-y-0 left-0 z-50 w-64 transform bg-white shadow-xl transition-transform duration-300 dark:bg-surface-800 lg:relative lg:translate-x-0",
+          sidebarOpen ? "translate-x-0" : "-translate-x-full"
+        )}
+      >
+        {/* Logo */}
+        <div className="flex h-16 items-center justify-between border-b border-surface-200 px-4 dark:border-surface-700">
+          <Link href="/" className="flex items-center gap-2">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600">
+              <Sparkles className="h-5 w-5 text-white" />
+            </div>
+            <span className="font-display text-lg font-bold text-surface-900 dark:text-white">
+              SmartCareer
+            </span>
+          </Link>
+          <button
+            onClick={() => setSidebarOpen(false)}
+            className="rounded-lg p-1 text-surface-500 hover:bg-surface-100 lg:hidden"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {/* Navigation */}
+        <nav className="flex-1 space-y-1 p-4">
+          {/* Quick Action */}
+          <Link href="/student/resumes/create-ai" className="block mb-6">
+            <motion.div
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+              className="flex items-center gap-3 rounded-xl bg-gradient-to-r from-purple-500 to-indigo-600 p-3 text-white shadow-lg shadow-purple-500/25"
+            >
+              <Sparkles className="h-5 w-5" />
+              <span className="font-medium">{t("dashboard.sidebar.createAIResume")}</span>
+            </motion.div>
+          </Link>
+
+          {/* Main Navigation */}
+          {navigation.map((item) => {
+            const active = isActive(item.href, item.exact);
+            return (
+              <Link key={item.href} href={item.href}>
+                <motion.div
+                  whileHover={{ x: 4 }}
+                  className={cn(
+                    "flex items-center justify-between rounded-xl px-3 py-2.5 transition-colors",
+                    active
+                      ? "bg-purple-50 text-purple-700 dark:bg-purple-900/20 dark:text-purple-400"
+                      : "text-surface-600 hover:bg-surface-100 dark:text-surface-400 dark:hover:bg-surface-700"
+                  )}
+                >
+                  <div className="flex items-center gap-3">
+                    <item.icon className="h-5 w-5" />
+                    <span className="font-medium">{item.name}</span>
+                  </div>
+                  {item.badge && (
+                    <Badge
+                      variant={
+                        item.badgeColor === "success"
+                          ? "success"
+                          : item.badgeColor === "warning"
+                          ? "warning"
+                          : "secondary"
+                      }
+                      className="text-xs"
+                    >
+                      {item.badge}
+                    </Badge>
+                  )}
+                </motion.div>
+              </Link>
+            );
+          })}
+        </nav>
+
+        {/* Sidebar Footer */}
+        <div className="border-t border-surface-200 p-4 dark:border-surface-700">
+          <div className="rounded-xl bg-gradient-to-br from-purple-50 to-indigo-50 p-4 dark:from-purple-900/20 dark:to-indigo-900/20">
+            <div className="flex items-center gap-2 text-purple-700 dark:text-purple-400">
+              <HelpCircle className="h-5 w-5" />
+              <span className="font-medium">{t("dashboard.sidebar.needHelp")}</span>
+            </div>
+            <p className="mt-2 text-sm text-surface-600 dark:text-surface-400">
+              {t("dashboard.sidebar.helpText")}
+            </p>
+            <Button variant="outline" size="sm" className="mt-3 w-full">
+              {t("dashboard.sidebar.viewDocs")}
+            </Button>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Top Navbar */}
+        <header className="flex h-16 items-center justify-between border-b border-surface-200 bg-white px-4 dark:border-surface-700 dark:bg-surface-800 lg:px-8">
+          {/* Left: Mobile menu + Search */}
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="rounded-lg p-2 text-surface-500 hover:bg-surface-100 lg:hidden"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
+
+            {/* Search */}
+            <div className="relative hidden sm:block">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-surface-400" />
+              <input
+                type="text"
+                placeholder={`${t("common.search")} ${t("dashboard.jobs.title").toLowerCase()}, ${t("dashboard.resumes.title").toLowerCase()}...`}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-64 rounded-xl border border-surface-200 bg-surface-50 py-2 pl-10 pr-4 text-sm placeholder-surface-400 focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500 lg:w-80"
+              />
+              <kbd className="absolute right-3 top-1/2 -translate-y-1/2 rounded bg-surface-200 px-1.5 py-0.5 text-xs text-surface-500">
+                ⌘K
+              </kbd>
+            </div>
+          </div>
+
+          {/* Right: Actions */}
+          <div className="flex items-center gap-2">
+            {/* Language Switcher */}
+            <LanguageSwitcher variant="minimal" />
+
+            {/* Theme Toggle */}
+            <button
+              onClick={() => setIsDark(!isDark)}
+              className="rounded-lg p-2 text-surface-500 hover:bg-surface-100 dark:hover:bg-surface-700"
+            >
+              {isDark ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+            </button>
+
+            {/* Notifications */}
+            <div className="relative">
+              <button
+                onClick={() => setNotificationsOpen(!notificationsOpen)}
+                className="relative rounded-lg p-2 text-surface-500 hover:bg-surface-100 dark:hover:bg-surface-700"
+              >
+                <Bell className="h-5 w-5" />
+                {unreadCount > 0 && (
+                  <span className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white">
+                    {unreadCount}
+                  </span>
+                )}
+              </button>
+
+              {/* Notifications Dropdown */}
+              <AnimatePresence>
+                {notificationsOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setNotificationsOpen(false)}
+                    />
+                    <motion.div
+                      initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                      className="absolute right-0 top-full z-50 mt-2 w-80 rounded-xl border border-surface-200 bg-white shadow-xl dark:border-surface-700 dark:bg-surface-800"
+                    >
+                      <div className="flex items-center justify-between border-b border-surface-200 p-4 dark:border-surface-700">
+                        <h3 className="font-semibold text-surface-900 dark:text-white">
+                          Notifications
+                        </h3>
+                        <button className="text-sm text-purple-600 hover:underline">
+                          Mark all as read
+                        </button>
+                      </div>
+                      <div className="max-h-80 overflow-y-auto">
+                        {notifications.map((notification) => (
+                          <div
+                            key={notification.id}
+                            className={cn(
+                              "flex gap-3 border-b border-surface-100 p-4 last:border-0 dark:border-surface-700",
+                              notification.unread && "bg-purple-50/50 dark:bg-purple-900/10"
+                            )}
+                          >
+                            <div className="flex-1">
+                              <p className="font-medium text-surface-900 dark:text-white">
+                                {notification.title}
+                              </p>
+                              <p className="mt-0.5 text-sm text-surface-500">
+                                {notification.message}
+                              </p>
+                              <p className="mt-1 text-xs text-surface-400">
+                                {notification.time}
+                              </p>
+                            </div>
+                            {notification.unread && (
+                              <div className="h-2 w-2 rounded-full bg-purple-500" />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="border-t border-surface-200 p-2 dark:border-surface-700">
+                        <Button variant="ghost" size="sm" className="w-full">
+                          View All Notifications
+                        </Button>
+                      </div>
+                    </motion.div>
+                  </>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* User Menu */}
+            <div className="relative">
+              <button
+                onClick={() => setUserMenuOpen(!userMenuOpen)}
+                className="flex items-center gap-2 rounded-xl p-1.5 hover:bg-surface-100 dark:hover:bg-surface-700"
+              >
+                <Avatar
+                  src={user?.avatar_url}
+                  alt={user?.full_name || "User"}
+                  fallback={user?.full_name?.charAt(0) || "U"}
+                  className="h-8 w-8"
+                />
+                <div className="hidden text-left sm:block">
+                  <p className="text-sm font-medium text-surface-900 dark:text-white">
+                    {user?.full_name || "User"}
+                  </p>
+                  <p className="text-xs text-surface-500">{t("common.student")}</p>
+                </div>
+                <ChevronDown className="h-4 w-4 text-surface-500" />
+              </button>
+
+              {/* User Dropdown */}
+              <AnimatePresence>
+                {userMenuOpen && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setUserMenuOpen(false)}
+                    />
+                    <motion.div
+                      initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                      className="absolute right-0 top-full z-50 mt-2 w-56 rounded-xl border border-surface-200 bg-white p-2 shadow-xl dark:border-surface-700 dark:bg-surface-800"
+                    >
+                      <div className="border-b border-surface-200 p-3 dark:border-surface-700">
+                        <p className="font-medium text-surface-900 dark:text-white">
+                          {user?.full_name || "User"}
+                        </p>
+                        <p className="text-sm text-surface-500">{user?.email}</p>
+                      </div>
+                      <div className="py-2">
+                        <Link
+                          href="/student/settings"
+                          onClick={() => setUserMenuOpen(false)}
+                          className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-surface-600 hover:bg-surface-100 dark:text-surface-400 dark:hover:bg-surface-700"
+                        >
+                          <User className="h-4 w-4" />
+                          Profile Settings
+                        </Link>
+                        <Link
+                          href="/student/settings"
+                          onClick={() => setUserMenuOpen(false)}
+                          className="flex items-center gap-3 rounded-lg px-3 py-2 text-sm text-surface-600 hover:bg-surface-100 dark:text-surface-400 dark:hover:bg-surface-700"
+                        >
+                          <Settings className="h-4 w-4" />
+                          Account Settings
+                        </Link>
+                      </div>
+                      <div className="border-t border-surface-200 pt-2 dark:border-surface-700">
+                        <button
+                          onClick={() => {
+                            setUserMenuOpen(false);
+                            logout();
+                          }}
+                          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-500/10"
+                        >
+                          <LogOut className="h-4 w-4" />
+                          Sign Out
+                        </button>
+                      </div>
+                    </motion.div>
+                  </>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+        </header>
+
+        {/* Page Content */}
+        <main className="flex-1 overflow-y-auto p-4 lg:p-8">
+          {children}
+        </main>
+      </div>
+    </div>
+  );
+}

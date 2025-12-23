@@ -1,0 +1,345 @@
+"""
+=============================================================================
+Pytest Configuration and Fixtures
+=============================================================================
+
+Global test fixtures for SmartCareer AI backend tests.
+
+AUTHOR: SmartCareer AI Team
+VERSION: 1.0.0
+=============================================================================
+"""
+
+import pytest
+import asyncio
+from typing import Generator
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.models.base import Base
+from app.models import User, UserRole, Job, Resume, Application
+from app.core.dependencies import get_db
+from app.core.security import create_access_token
+from app.config import settings
+
+# =============================================================================
+# DATABASE FIXTURES
+# =============================================================================
+
+@pytest.fixture(scope="function")
+def test_db():
+    """Create test database with in-memory SQLite."""
+    
+    # Create in-memory SQLite engine
+    engine = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    
+    # Create all tables
+    Base.metadata.create_all(bind=engine)
+    
+    # Create session
+    TestingSessionLocal = sessionmaker(bind=engine)
+    db = TestingSessionLocal()
+    
+    try:
+        yield db
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+@pytest.fixture(scope="function")
+def client(test_db):
+    """Create test client with test database."""
+    
+    def override_get_db():
+        try:
+            yield test_db
+        finally:
+            pass
+    
+    app.dependency_overrides[get_db] = override_get_db
+    
+    with TestClient(app) as test_client:
+        yield test_client
+    
+    app.dependency_overrides.clear()
+
+
+# =============================================================================
+# USER FIXTURES
+# =============================================================================
+
+@pytest.fixture
+def test_student(test_db) -> User:
+    """Create test student user."""
+    user = User(
+        id=uuid4(),
+        email="test.student@example.com",
+        full_name="Test Student",
+        phone="+998901234567",
+        role=UserRole.STUDENT,
+        is_active=True,
+        is_verified=True,
+    )
+    user.set_password("TestPassword123!")
+    
+    test_db.add(user)
+    test_db.commit()
+    test_db.refresh(user)
+    
+    return user
+
+
+@pytest.fixture
+def test_company(test_db) -> User:
+    """Create test company user."""
+    user = User(
+        id=uuid4(),
+        email="test.company@example.com",
+        full_name="Test Company HR",
+        phone="+998901234568",
+        role=UserRole.COMPANY,
+        company_name="Test Company",
+        company_website="https://test.com",
+        is_active=True,
+        is_verified=True,
+    )
+    user.set_password("TestPassword123!")
+    
+    test_db.add(user)
+    test_db.commit()
+    test_db.refresh(user)
+    
+    return user
+
+
+@pytest.fixture
+def test_admin(test_db) -> User:
+    """Create test admin user."""
+    user = User(
+        id=uuid4(),
+        email="test.admin@example.com",
+        full_name="Test Admin",
+        phone="+998901234569",
+        role=UserRole.ADMIN,
+        is_active=True,
+        is_verified=True,
+    )
+    user.set_password("AdminPassword123!")
+    
+    test_db.add(user)
+    test_db.commit()
+    test_db.refresh(user)
+    
+    return user
+
+
+# =============================================================================
+# TOKEN FIXTURES
+# =============================================================================
+
+@pytest.fixture
+def student_token(test_student: User) -> str:
+    """Create access token for test student."""
+    return create_access_token(
+        subject=str(test_student.id),
+        additional_claims={"role": test_student.role.value}
+    )
+
+
+@pytest.fixture
+def company_token(test_company: User) -> str:
+    """Create access token for test company."""
+    return create_access_token(
+        subject=str(test_company.id),
+        additional_claims={"role": test_company.role.value}
+    )
+
+
+@pytest.fixture
+def admin_token(test_admin: User) -> str:
+    """Create access token for test admin."""
+    return create_access_token(
+        subject=str(test_admin.id),
+        additional_claims={"role": test_admin.role.value}
+    )
+
+
+# =============================================================================
+# AUTH HEADERS FIXTURES
+# =============================================================================
+
+@pytest.fixture
+def student_headers(student_token: str) -> dict:
+    """Create auth headers for student."""
+    return {"Authorization": f"Bearer {student_token}"}
+
+
+@pytest.fixture
+def company_headers(company_token: str) -> dict:
+    """Create auth headers for company."""
+    return {"Authorization": f"Bearer {company_token}"}
+
+
+@pytest.fixture
+def admin_headers(admin_token: str) -> dict:
+    """Create auth headers for admin."""
+    return {"Authorization": f"Bearer {admin_token}"}
+
+
+# =============================================================================
+# DATA FIXTURES
+# =============================================================================
+
+@pytest.fixture
+def test_resume(test_db, test_student: User) -> Resume:
+    """Create test resume."""
+    resume = Resume(
+        id=uuid4(),
+        user_id=test_student.id,
+        title="Test Resume",
+        template="modern",
+        status="published",
+        personal_info={
+            "full_name": test_student.full_name,
+            "email": test_student.email,
+            "phone": test_student.phone,
+        },
+        summary="Test summary",
+        skills=["Python", "FastAPI", "PostgreSQL"],
+        ats_score=85,
+    )
+    
+    test_db.add(resume)
+    test_db.commit()
+    test_db.refresh(resume)
+    
+    return resume
+
+
+@pytest.fixture
+def test_job(test_db, test_company: User) -> Job:
+    """Create test job."""
+    job = Job(
+        id=uuid4(),
+        company_id=test_company.id,
+        title="Test Job",
+        description="Test job description",
+        requirements=["Python", "FastAPI"],
+        salary_min=1000,
+        salary_max=2000,
+        currency="USD",
+        location="Tashkent",
+        location_type="hybrid",
+        employment_type="full_time",
+        experience_level="mid",
+        skills_required=["Python", "FastAPI"],
+        status="published",
+    )
+    
+    test_db.add(job)
+    test_db.commit()
+    test_db.refresh(job)
+    
+    return job
+
+
+@pytest.fixture
+def test_application(test_db, test_student: User, test_job: Job, test_resume: Resume) -> Application:
+    """Create test application."""
+    application = Application(
+        id=uuid4(),
+        job_id=test_job.id,
+        user_id=test_student.id,
+        resume_id=test_resume.id,
+        status="pending",
+        cover_letter="Test cover letter",
+    )
+    
+    test_db.add(application)
+    test_db.commit()
+    test_db.refresh(application)
+    
+    return application
+
+
+# =============================================================================
+# MOCK DATA FIXTURES
+# =============================================================================
+
+@pytest.fixture
+def sample_resume_data() -> dict:
+    """Sample resume data for testing."""
+    return {
+        "title": "Software Developer Resume",
+        "template": "professional",
+        "personal_info": {
+            "full_name": "John Doe",
+            "email": "john@example.com",
+            "phone": "+998901234567",
+            "location": "Tashkent, Uzbekistan",
+        },
+        "summary": "Experienced software developer with 5+ years in backend development.",
+        "experience": [
+            {
+                "company": "Tech Corp",
+                "position": "Senior Developer",
+                "start_date": "2020-01-01",
+                "end_date": None,
+                "is_current": True,
+                "description": "Leading backend team",
+            }
+        ],
+        "education": [
+            {
+                "institution": "TUIT",
+                "degree": "Bachelor",
+                "field": "Computer Science",
+                "start_date": "2014-09-01",
+                "end_date": "2018-06-01",
+            }
+        ],
+        "skills": ["Python", "FastAPI", "PostgreSQL", "Docker"],
+    }
+
+
+@pytest.fixture
+def sample_job_data() -> dict:
+    """Sample job data for testing."""
+    return {
+        "title": "Backend Developer",
+        "description": "We are looking for a backend developer",
+        "requirements": ["Python", "FastAPI", "PostgreSQL"],
+        "responsibilities": ["Develop APIs", "Write tests"],
+        "salary_min": 2000,
+        "salary_max": 4000,
+        "currency": "USD",
+        "location": "Tashkent",
+        "location_type": "hybrid",
+        "employment_type": "full_time",
+        "experience_level": "mid",
+        "skills_required": ["Python", "FastAPI"],
+        "benefits": ["Health insurance", "Remote work"],
+    }
+
+
+# =============================================================================
+# ASYNC FIXTURES
+# =============================================================================
+
+@pytest.fixture
+def event_loop():
+    """Create event loop for async tests."""
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()

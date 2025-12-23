@@ -1,0 +1,541 @@
+"""
+=============================================================================
+FASTAPI DEPENDENCIES
+=============================================================================
+
+PURPOSE:
+    Provides reusable dependencies for FastAPI route handlers.
+    Dependencies are injected automatically by FastAPI.
+
+=============================================================================
+WHAT ARE DEPENDENCIES?
+=============================================================================
+
+Dependencies are functions that run before your route handler.
+They can:
+- Validate input (tokens, headers)
+- Load data (database session, current user)
+- Enforce permissions (admin-only routes)
+
+FastAPI's dependency injection is powerful:
+- Automatic parameter resolution
+- Caching within a request
+- Hierarchical dependencies
+
+=============================================================================
+USAGE EXAMPLES
+=============================================================================
+
+    from app.core.dependencies import get_current_user, get_db
+    
+    @app.get("/me")
+    def get_profile(
+        current_user: User = Depends(get_current_user),
+        db: Session = Depends(get_db)
+    ):
+        return current_user.to_dict()
+    
+    # Admin-only route
+    @app.delete("/users/{user_id}")
+    def delete_user(
+        user_id: UUID,
+        admin: User = Depends(get_current_admin),  # Enforces admin role
+        db: Session = Depends(get_db)
+    ):
+        ...
+
+=============================================================================
+AUTHOR: SmartCareer AI Team
+VERSION: 1.0.0
+=============================================================================
+"""
+
+# =============================================================================
+# IMPORTS
+# =============================================================================
+
+import logging
+from typing import Generator, Optional
+from uuid import UUID
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.orm import Session
+
+# Local imports
+from app.database import SessionLocal
+from app.models import User, UserRole
+from app.core.security import (
+    verify_token,
+    TokenType,
+    TokenPayload,
+    TokenError,
+    TokenExpiredError,
+    TokenBlacklistedError,
+)
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+
+logger = logging.getLogger(__name__)
+
+# =============================================================================
+# SECURITY SCHEME
+# =============================================================================
+
+# HTTPBearer extracts token from "Authorization: Bearer <token>" header
+# auto_error=True returns 401 if header is missing
+oauth2_scheme = HTTPBearer(auto_error=True)
+
+# For optional authentication (some routes work with or without auth)
+oauth2_scheme_optional = HTTPBearer(auto_error=False)
+
+
+# =============================================================================
+# DATABASE DEPENDENCY
+# =============================================================================
+
+def get_db() -> Generator[Session, None, None]:
+    """
+    Get database session for request.
+    
+    Creates a new session for each request and ensures it's closed
+    after the request completes (even on error).
+    
+    Yields:
+        SQLAlchemy Session
+        
+    Usage:
+        @app.get("/users")
+        def get_users(db: Session = Depends(get_db)):
+            return db.query(User).all()
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+# =============================================================================
+# TOKEN EXTRACTION
+# =============================================================================
+
+def get_token_payload(
+    credentials: HTTPAuthorizationCredentials = Depends(oauth2_scheme)
+) -> TokenPayload:
+    """
+    Extract and verify JWT token from Authorization header.
+    
+    Raises:
+        HTTPException 401: If token is invalid, expired, or revoked
+    """
+    token = credentials.credentials
+    
+    try:
+        payload = verify_token(token, expected_type=TokenType.ACCESS)
+        return payload
+    except TokenExpiredError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except TokenBlacklistedError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except TokenError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def get_optional_token_payload(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(oauth2_scheme_optional)
+) -> Optional[TokenPayload]:
+    """
+    Optionally extract token payload.
+    
+    Returns None if no token provided (instead of raising error).
+    Useful for routes that work with or without authentication.
+    
+    Returns:
+        TokenPayload if valid token, None otherwise
+    """
+    if not credentials:
+        return None
+    
+    try:
+        return verify_token(credentials.credentials, expected_type=TokenType.ACCESS)
+    except TokenError:
+        return None
+
+
+# =============================================================================
+# USER DEPENDENCIES
+# =============================================================================
+
+def get_current_user(
+    payload: TokenPayload = Depends(get_token_payload),
+    db: Session = Depends(get_db)
+) -> User:
+    """
+    Get the current authenticated user.
+    
+    Loads user from database based on token subject.
+    
+    Raises:
+        HTTPException 401: If token invalid or user not found
+        
+    Usage:
+        @app.get("/me")
+        def get_profile(user: User = Depends(get_current_user)):
+            return user.to_dict()
+    """
+    user_id = payload.user_id
+    
+    try:
+        user = db.query(User).filter(
+            User.id == UUID(user_id),
+            User.is_deleted == False  # Exclude soft-deleted users
+        ).first()
+    except ValueError:
+        logger.warning(f"Invalid user ID in token: {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid user ID in token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    if not user:
+        logger.warning(f"User not found for token: {user_id}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    return user
+
+
+def get_current_active_user(
+    user: User = Depends(get_current_user)
+) -> User:
+    """
+    Get current user, ensuring they are active.
+    
+    Builds on get_current_user, adding active status check.
+    
+    Raises:
+        HTTPException 403: If user is inactive
+    """
+    if not user.is_active_account:
+        logger.warning(f"Inactive user attempted access: {user.id}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account has been deactivated. Please contact support.",
+        )
+    
+    return user
+
+
+def get_current_verified_user(
+    user: User = Depends(get_current_active_user)
+) -> User:
+    """
+    Get current user, ensuring email is verified.
+    
+    Raises:
+        HTTPException 403: If email not verified
+    """
+    if not user.is_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Please verify your email address to access this feature.",
+        )
+    
+    return user
+
+
+def get_optional_current_user(
+    payload: Optional[TokenPayload] = Depends(get_optional_token_payload),
+    db: Session = Depends(get_db)
+) -> Optional[User]:
+    """
+    Optionally get current user.
+    
+    Returns None if not authenticated (instead of raising error).
+    Useful for routes that show different content for logged-in users.
+    
+    Usage:
+        @app.get("/jobs")
+        def list_jobs(user: Optional[User] = Depends(get_optional_current_user)):
+            if user:
+                # Show personalized recommendations
+                pass
+            else:
+                # Show public listings
+                pass
+    """
+    if not payload:
+        return None
+    
+    try:
+        user = db.query(User).filter(
+            User.id == UUID(payload.user_id),
+            User.is_deleted == False,
+            User.is_active_account == True
+        ).first()
+        return user
+    except (ValueError, Exception):
+        return None
+
+
+# =============================================================================
+# ROLE-BASED DEPENDENCIES
+# =============================================================================
+
+def get_current_admin(
+    user: User = Depends(get_current_active_user)
+) -> User:
+    """
+    Get current user, ensuring they are an admin.
+    
+    Raises:
+        HTTPException 403: If user is not an admin
+        
+    Usage:
+        @app.delete("/users/{user_id}")
+        def delete_user(
+            user_id: UUID,
+            admin: User = Depends(get_current_admin)
+        ):
+            # Only admins can reach here
+            ...
+    """
+    if user.role != UserRole.ADMIN:
+        logger.warning(f"Non-admin user attempted admin action: {user.id}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+    
+    return user
+
+
+def get_current_company(
+    user: User = Depends(get_current_active_user)
+) -> User:
+    """
+    Get current user, ensuring they are a company account.
+    
+    Raises:
+        HTTPException 403: If user is not a company
+        
+    Usage:
+        @app.post("/jobs")
+        def create_job(
+            job: JobCreate,
+            company: User = Depends(get_current_company)
+        ):
+            # Only companies can post jobs
+            ...
+    """
+    if user.role not in (UserRole.COMPANY, UserRole.ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Company account required to post jobs",
+        )
+    
+    return user
+
+
+def get_current_student(
+    user: User = Depends(get_current_active_user)
+) -> User:
+    """
+    Get current user, ensuring they are a student.
+    
+    Raises:
+        HTTPException 403: If user is not a student
+    """
+    if user.role != UserRole.STUDENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Student account required",
+        )
+    
+    return user
+
+
+# =============================================================================
+# PAGINATION DEPENDENCY
+# =============================================================================
+
+class PaginationParams:
+    """
+    Pagination parameters for list endpoints.
+    
+    Usage:
+        @app.get("/jobs")
+        def list_jobs(
+            pagination: PaginationParams = Depends()
+        ):
+            query = db.query(Job)
+            query = query.offset(pagination.skip).limit(pagination.limit)
+            return query.all()
+    """
+    
+    def __init__(
+        self,
+        page: int = 1,
+        page_size: int = 20
+    ):
+        """
+        Initialize pagination.
+        
+        Args:
+            page: Page number (1-indexed)
+            page_size: Items per page (max 100)
+        """
+        # Validate page
+        if page < 1:
+            page = 1
+        
+        # Validate page_size
+        if page_size < 1:
+            page_size = 20
+        if page_size > 100:
+            page_size = 100
+        
+        self.page = page
+        self.page_size = page_size
+    
+    @property
+    def skip(self) -> int:
+        """Calculate offset for database query."""
+        return (self.page - 1) * self.page_size
+    
+    @property
+    def limit(self) -> int:
+        """Get limit for database query."""
+        return self.page_size
+
+
+# =============================================================================
+# RATE LIMITING (Simple In-Memory Implementation)
+# =============================================================================
+
+from collections import defaultdict
+from datetime import datetime
+import asyncio
+
+# Simple in-memory rate limiter
+# In production, use Redis-based rate limiting
+_rate_limit_store: dict = defaultdict(list)
+_rate_limit_lock = asyncio.Lock()
+
+
+async def check_rate_limit(
+    key: str,
+    max_requests: int = 100,
+    window_seconds: int = 60
+) -> bool:
+    """
+    Check if rate limit is exceeded.
+    
+    Simple sliding window implementation.
+    In production, use Redis with proper TTL.
+    
+    Args:
+        key: Identifier (e.g., IP address, user ID)
+        max_requests: Maximum requests in window
+        window_seconds: Time window in seconds
+        
+    Returns:
+        True if allowed, False if rate limited
+    """
+    now = datetime.now()
+    window_start = now - timedelta(seconds=window_seconds)
+    
+    async with _rate_limit_lock:
+        # Clean old entries
+        _rate_limit_store[key] = [
+            ts for ts in _rate_limit_store[key]
+            if ts > window_start
+        ]
+        
+        # Check limit
+        if len(_rate_limit_store[key]) >= max_requests:
+            return False
+        
+        # Add current request
+        _rate_limit_store[key].append(now)
+        return True
+
+
+from datetime import timedelta
+
+
+def rate_limit(max_requests: int = 100, window_seconds: int = 60):
+    """
+    Rate limiting dependency factory.
+    
+    Usage:
+        @app.post("/login")
+        async def login(
+            _: None = Depends(rate_limit(max_requests=5, window_seconds=60))
+        ):
+            ...
+    """
+    async def rate_limit_dependency(
+        credentials: Optional[HTTPAuthorizationCredentials] = Depends(oauth2_scheme_optional)
+    ):
+        # Use token subject or "anonymous" as key
+        if credentials:
+            try:
+                payload = verify_token(credentials.credentials)
+                key = f"user:{payload.user_id}"
+            except TokenError:
+                key = "anonymous"
+        else:
+            key = "anonymous"
+        
+        allowed = await check_rate_limit(key, max_requests, window_seconds)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Rate limit exceeded. Max {max_requests} requests per {window_seconds} seconds.",
+            )
+    
+    return rate_limit_dependency
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

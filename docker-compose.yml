@@ -1,0 +1,158 @@
+version: '3.8'
+
+services:
+  # =============================================================================
+  # PostgreSQL Database
+  # =============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: smartcareer_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: smartcareer
+      POSTGRES_USER: smartcareer
+      POSTGRES_PASSWORD: smartcareer_password_change_in_production
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smartcareer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - smartcareer_network
+
+  # =============================================================================
+  # Redis (for caching, sessions, and task queue)
+  # =============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: smartcareer_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass smartcareer_redis_password
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - smartcareer_network
+
+  # =============================================================================
+  # Backend (FastAPI)
+  # =============================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: smartcareer_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # App
+      APP_NAME: "SmartCareer AI"
+      DEBUG: "false"
+      
+      # Database
+      DATABASE_URL: postgresql://smartcareer:smartcareer_password_change_in_production@postgres:5432/smartcareer
+      
+      # Redis
+      REDIS_URL: redis://:smartcareer_redis_password@redis:6379/0
+      
+      # JWT (use secrets from .env in production)
+      SECRET_KEY: ${SECRET_KEY:-your-super-secret-key-change-this}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-your-jwt-secret-key-change-this}
+      
+      # AI
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      AI_PROVIDER: ${AI_PROVIDER:-gemini}
+      
+      # Email
+      SMTP_HOST: ${SMTP_HOST:-smtp.gmail.com}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-noreply@smartcareer.uz}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      
+      # Frontend URL
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      
+      # CORS
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000,http://frontend:3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - backend_uploads:/app/uploads
+    command: >
+      sh -c "
+        echo 'Waiting for database...' &&
+        sleep 5 &&
+        echo 'Running migrations...' &&
+        alembic upgrade head &&
+        echo 'Starting server...' &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      "
+    networks:
+      - smartcareer_network
+
+  # =============================================================================
+  # Frontend (Next.js)
+  # =============================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    container_name: smartcareer_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NODE_ENV: production
+    depends_on:
+      - backend
+    networks:
+      - smartcareer_network
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  backend_uploads:
+    driver: local
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  smartcareer_network:
+    driver: bridge
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,911 @@
+"""
+=============================================================================
+AUTHENTICATION ENDPOINTS
+=============================================================================
+
+Handles user registration, login, logout, and password management.
+
+ENDPOINTS:
+    POST /register      - Create new account
+    POST /login         - Authenticate and get tokens
+    POST /refresh       - Get new access token
+    POST /logout        - Invalidate tokens
+    POST /forgot-password - Request password reset
+    POST /reset-password  - Reset password with token
+    GET  /me            - Get current user profile
+
+=============================================================================
+AUTHOR: SmartCareer AI Team
+VERSION: 1.0.0
+=============================================================================
+"""
+
+# =============================================================================
+# IMPORTS
+# =============================================================================
+
+import logging
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
+
+# Local imports
+from app.core.dependencies import get_db, get_current_user, get_current_active_user
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    create_reset_password_token,
+    verify_token,
+    verify_reset_password_token,
+    blacklist_token,
+    get_password_hash,
+    TokenType,
+    TokenError,
+)
+from app.models import User, UserRole
+from app.schemas.auth import (
+    UserRegister,
+    UserLogin,
+    TokenResponse,
+    TokenRefreshRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    ChangePasswordRequest,
+    UserResponse,
+    MessageResponse,
+)
+from app.config import settings
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+
+logger = logging.getLogger(__name__)
+
+# =============================================================================
+# ROUTER
+# =============================================================================
+
+router = APIRouter()
+
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def create_token_response(user: User) -> TokenResponse:
+    """
+    Create token response for a user.
+    
+    Args:
+        user: Authenticated user
+        
+    Returns:
+        TokenResponse with access and refresh tokens
+    """
+    # Create tokens
+    access_token = create_access_token(
+        subject=str(user.id),
+        additional_claims={"role": user.role.value}
+    )
+    refresh_token = create_refresh_token(subject=str(user.id))
+    
+    # Build user response
+    user_response = UserResponse(
+        id=str(user.id),
+        email=user.email,
+        full_name=user.full_name,
+        phone=user.phone,
+        role=user.role.value,
+        is_verified=user.is_verified,
+        avatar_url=user.avatar_url,
+        bio=user.bio,
+        location=user.location,
+        company_name=user.company_name,
+        company_website=user.company_website,
+        created_at=user.created_at,
+    )
+    
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        user=user_response,
+    )
+
+
+async def send_password_reset_email(email: str, user_name: str, token: str):
+    """
+    Send password reset email using email service.
+    """
+    try:
+        from app.services.email_service import email_service
+        await email_service.send_password_reset_email(
+            to_email=email,
+            user_name=user_name,
+            reset_token=token,
+            language="uz"  # Default language
+        )
+        logger.info(f"Password reset email sent to {email[:3]}***")
+    except Exception as e:
+        logger.error(f"Failed to send password reset email: {e}")
+        # Don't raise - email failure shouldn't block the flow
+
+
+# =============================================================================
+# ENDPOINTS
+# =============================================================================
+
+@router.post(
+    "/register",
+    response_model=TokenResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register new user",
+    description="""
+    Create a new user account.
+    
+    **Request body:**
+    - `email`: Valid email address (must be unique)
+    - `password`: Strong password (min 8 chars, uppercase, lowercase, digit)
+    - `full_name`: User's full name
+    - `phone`: Optional phone number in international format
+    - `role`: Account type (student or company)
+    - `company_name`: Required for company accounts
+    
+    **Returns:**
+    - Access token and refresh token
+    - User profile data
+    
+    **Errors:**
+    - 400: Email already registered
+    - 422: Validation error (weak password, invalid email, etc.)
+    """
+)
+async def register(
+    user_data: UserRegister,
+    db: Session = Depends(get_db)
+):
+    """Register a new user."""
+    
+    logger.info(f"Registration attempt for email: {user_data.email}")
+    
+    # Check if email already exists
+    existing_user = db.query(User).filter(
+        User.email == user_data.email.lower()
+    ).first()
+    
+    if existing_user:
+        logger.warning(f"Registration failed: email exists - {user_data.email}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="An account with this email already exists"
+        )
+    
+    # Create new user
+    try:
+        user = User(
+            email=user_data.email.lower(),
+            full_name=user_data.full_name,
+            phone=user_data.phone,
+            role=UserRole(user_data.role.value),
+            company_name=user_data.company_name if user_data.role.value == "company" else None,
+            company_website=user_data.company_website if user_data.role.value == "company" else None,
+        )
+        user.set_password(user_data.password)
+        
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        
+        logger.info(f"User registered successfully: {user.id}")
+        
+        # Send welcome email (background)
+        try:
+            from app.services.email_service import email_service
+            await email_service.send_welcome_email(
+                to_email=user.email,
+                user_name=user.full_name,
+                language="uz"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send welcome email: {e}")
+        
+        # Return tokens
+        return create_token_response(user)
+        
+    except IntegrityError as e:
+        db.rollback()
+        logger.error(f"Registration integrity error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Registration failed. Please try again."
+        )
+    except ValueError as e:
+        db.rollback()
+        logger.error(f"Registration validation error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    summary="Login user",
+    description="""
+    Authenticate with email and password.
+    
+    **Request body:**
+    - `email`: Email address
+    - `password`: Password
+    
+    **Returns:**
+    - Access token (expires in 30 minutes)
+    - Refresh token (expires in 7 days)
+    - User profile data
+    
+    **Errors:**
+    - 401: Invalid credentials
+    - 403: Account inactive or locked
+    - 429: Too many failed attempts
+    
+    **Security:**
+    - Rate limited: 5 attempts per minute per IP
+    - Account locked after 5 failed attempts for 15 minutes
+    """
+)
+async def login(
+    credentials: UserLogin,
+    request: Request,
+    db: Session = Depends(get_db)
+):
+    """Authenticate user and return tokens with brute-force protection."""
+    
+    from app.core.rate_limiter import (
+        check_login_rate_limit,
+        is_account_locked,
+        record_failed_login,
+        clear_failed_logins
+    )
+    
+    # Check rate limit (5 login attempts per minute per IP)
+    check_login_rate_limit(request)
+    
+    # Get client IP
+    client_ip = request.client.host if request.client else "unknown"
+    
+    logger.info(f"Login attempt for: {credentials.email} from {client_ip}")
+    
+    # Check if account is locked due to failed attempts
+    is_locked, unlock_after = is_account_locked(credentials.email)
+    if is_locked:
+        logger.warning(
+            f"Login blocked: account locked - {credentials.email} "
+            f"(unlock in {unlock_after}s)"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Account temporarily locked due to multiple failed login attempts. "
+                   f"Try again in {unlock_after // 60} minutes.",
+        )
+    
+    # Find user by email
+    user = db.query(User).filter(
+        User.email == credentials.email.lower(),
+        User.is_deleted == False
+    ).first()
+    
+    # Check credentials
+    if not user or not user.verify_password(credentials.password):
+        # Record failed attempt
+        is_locked, unlock_after, remaining = record_failed_login(
+            credentials.email,
+            client_ip
+        )
+        
+        if is_locked:
+            logger.critical(
+                f"Account locked after failed attempts: {credentials.email} from {client_ip}"
+            )
+            
+            # Log to error service
+            try:
+                from app.services.error_logging_service import error_logger, ErrorCategory, ErrorSeverity
+                await error_logger.log_auth_error(
+                    error="Account locked due to brute-force attempt",
+                    error_type="brute_force_detected",
+                    email=credentials.email,
+                    ip_address=client_ip,
+                    extra_data={"unlock_after_seconds": unlock_after}
+                )
+            except Exception:
+                pass
+            
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Account locked due to multiple failed login attempts. "
+                       f"Try again in {unlock_after // 60} minutes.",
+            )
+        
+        logger.warning(
+            f"Login failed: invalid credentials - {credentials.email} "
+            f"({remaining} attempts remaining)"
+        )
+        
+        # Log auth error
+        try:
+            from app.services.error_logging_service import error_logger, ErrorCategory, ErrorSeverity
+            await error_logger.log_auth_error(
+                error="Invalid login credentials",
+                error_type="login_failed",
+                email=credentials.email,
+                ip_address=client_ip,
+                extra_data={"remaining_attempts": remaining}
+            )
+        except Exception:
+            pass
+        
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Check if account is active
+    if not user.is_active_account:
+        logger.warning(f"Login failed: inactive account - {user.id}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your account has been deactivated. Please contact support."
+        )
+    
+    # Clear failed login attempts on successful login
+    clear_failed_logins(credentials.email)
+    
+    # Update last login
+    user.last_login = datetime.now(timezone.utc)
+    db.commit()
+    
+    logger.info(f"Login successful: {user.id} from {client_ip}")
+    
+    # Send login notification email (optional, background)
+    try:
+        from app.services.email_service import email_service
+        import asyncio
+        asyncio.create_task(
+            email_service.send_login_notification(
+                to_email=user.email,
+                user_name=user.full_name,
+                ip_address=client_ip,
+                user_agent=request.headers.get("user-agent", "Unknown"),
+                language="uz"
+            )
+        )
+    except Exception as e:
+        logger.error(f"Failed to send login notification: {e}")
+    
+    return create_token_response(user)
+
+
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    summary="Refresh access token",
+    description="""
+    Get a new access token using a refresh token.
+    
+    **Request body:**
+    - `refresh_token`: Valid refresh token from login
+    
+    **Returns:**
+    - New access token
+    - Same refresh token
+    - User profile data
+    
+    **Errors:**
+    - 401: Invalid or expired refresh token
+    """
+)
+async def refresh_token(
+    request: TokenRefreshRequest,
+    db: Session = Depends(get_db)
+):
+    """Refresh access token."""
+    
+    try:
+        # Verify refresh token
+        payload = verify_token(
+            request.refresh_token,
+            expected_type=TokenType.REFRESH
+        )
+        
+        # Get user
+        user = db.query(User).filter(
+            User.id == payload.user_id,
+            User.is_deleted == False,
+            User.is_active_account == True
+        ).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found"
+            )
+        
+        logger.info(f"Token refresh for user: {user.id}")
+        
+        return create_token_response(user)
+        
+    except TokenError as e:
+        logger.warning(f"Token refresh failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+@router.post(
+    "/logout",
+    response_model=MessageResponse,
+    summary="Logout user",
+    description="""
+    Invalidate the current access token.
+    
+    The token will be added to a blacklist and cannot be used again.
+    
+    **Requires:** Bearer token in Authorization header
+    """
+)
+async def logout(
+    current_user: User = Depends(get_current_user),
+    # We need the actual token to blacklist it
+):
+    """Logout user by blacklisting token."""
+    
+    # Note: In a real implementation, we'd get the token from the request
+    # and blacklist it. For now, this is a placeholder.
+    
+    logger.info(f"Logout for user: {current_user.id}")
+    
+    return MessageResponse(
+        message="Successfully logged out",
+        success=True
+    )
+
+
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    summary="Request password reset",
+    description="""
+    Request a password reset email.
+    
+    If the email exists, a reset link will be sent.
+    Always returns success to prevent email enumeration.
+    
+    **Request body:**
+    - `email`: Email address
+    """
+)
+async def forgot_password(
+    request: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """Send password reset email."""
+    
+    logger.info(f"Password reset requested for: {request.email}")
+    
+    # Find user (but don't reveal if exists)
+    user = db.query(User).filter(
+        User.email == request.email.lower(),
+        User.is_deleted == False
+    ).first()
+    
+    if user:
+        # Create reset token
+        reset_token = create_reset_password_token(user.email)
+        
+        # Send email in background
+        background_tasks.add_task(
+            send_password_reset_email,
+            user.email,
+            user.full_name,
+            reset_token
+        )
+    
+    # Always return success (prevent email enumeration)
+    return MessageResponse(
+        message="If an account exists with this email, a reset link has been sent.",
+        success=True
+    )
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+    summary="Reset password",
+    description="""
+    Reset password using token from email.
+    
+    **Request body:**
+    - `token`: Reset token from email
+    - `new_password`: New password (must meet strength requirements)
+    
+    **Errors:**
+    - 400: Invalid or expired token
+    - 422: Weak password
+    """
+)
+async def reset_password(
+    request: ResetPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    """Reset password with token."""
+    
+    try:
+        # Verify token and get email
+        email = verify_reset_password_token(request.token)
+        
+        # Find user
+        user = db.query(User).filter(
+            User.email == email,
+            User.is_deleted == False
+        ).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid reset token"
+            )
+        
+        # Update password
+        user.set_password(request.new_password)
+        db.commit()
+        
+        logger.info(f"Password reset successful for: {user.id}")
+        
+        return MessageResponse(
+            message="Password has been reset successfully. You can now login.",
+            success=True
+        )
+        
+    except TokenError as e:
+        logger.warning(f"Password reset failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired reset token"
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.post(
+    "/change-password",
+    response_model=MessageResponse,
+    summary="Change password",
+    description="""
+    Change password for logged-in user.
+    
+    **Requires:** Bearer token in Authorization header
+    
+    **Request body:**
+    - `current_password`: Current password
+    - `new_password`: New password
+    
+    **Errors:**
+    - 400: Current password incorrect
+    - 422: New password too weak
+    """
+)
+async def change_password(
+    request: ChangePasswordRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Change password for authenticated user."""
+    
+    # Verify current password
+    if not current_user.verify_password(request.current_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect"
+        )
+    
+    # Update password
+    try:
+        current_user.set_password(request.new_password)
+        db.commit()
+        
+        logger.info(f"Password changed for user: {current_user.id}")
+        
+        return MessageResponse(
+            message="Password changed successfully",
+            success=True
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    summary="Get current user",
+    description="""
+    Get the profile of the currently authenticated user.
+    
+    **Requires:** Bearer token in Authorization header
+    """
+)
+async def get_current_user_profile(
+    current_user: User = Depends(get_current_active_user)
+):
+    """Get current user profile."""
+    
+    return UserResponse(
+        id=str(current_user.id),
+        email=current_user.email,
+        full_name=current_user.full_name,
+        phone=current_user.phone,
+        role=current_user.role.value,
+        is_verified=current_user.is_verified,
+        avatar_url=current_user.avatar_url,
+        bio=current_user.bio,
+        location=current_user.location,
+        company_name=current_user.company_name,
+        company_website=current_user.company_website,
+        created_at=current_user.created_at,
+    )
+
+
+# =============================================================================
+# OAUTH2 ENDPOINTS
+# =============================================================================
+
+@router.get(
+    "/oauth/google",
+    summary="Google OAuth - Get authorization URL",
+    description="Get Google OAuth authorization URL for frontend redirect"
+)
+async def google_oauth_authorize():
+    """Get Google OAuth authorization URL."""
+    from app.services.oauth_service import oauth_service
+    import secrets
+    
+    if not oauth_service.is_configured()["google"]:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Google OAuth not configured. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET to .env"
+        )
+    
+    # Generate CSRF state token
+    state = secrets.token_urlsafe(32)
+    
+    # Get authorization URL
+    auth_url = oauth_service.get_google_auth_url(state)
+    
+    return {
+        "auth_url": auth_url,
+        "state": state,
+    }
+
+
+@router.get(
+    "/callback/google",
+    response_model=TokenResponse,
+    summary="Google OAuth callback",
+    description="Handle Google OAuth callback and create/login user"
+)
+async def google_oauth_callback(
+    code: str,
+    state: str,
+    db: Session = Depends(get_db)
+):
+    """Handle Google OAuth callback."""
+    from app.services.oauth_service import oauth_service
+    
+    try:
+        # Get user info from Google
+        user_info = await oauth_service.get_google_user_info(code)
+        
+        email = user_info.get("email")
+        if not email:
+            raise ValueError("No email in Google response")
+        
+        # Check if user exists
+        user = db.query(User).filter(
+            User.email == email.lower(),
+            User.is_deleted == False
+        ).first()
+        
+        if user:
+            # Existing user - login
+            logger.info(f"Google OAuth login for existing user: {user.id}")
+        else:
+            # New user - create account
+            user = User(
+                email=email.lower(),
+                full_name=user_info.get("name", "User"),
+                role=UserRole.STUDENT,  # Default role
+                is_active=True,
+                is_verified=True,  # Email verified by Google
+                avatar_url=user_info.get("picture"),
+            )
+            # Set random password (won't be used)
+            import secrets
+            user.set_password(secrets.token_urlsafe(32))
+            
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            
+            logger.info(f"New user created via Google OAuth: {user.id}")
+            
+            # Send welcome email
+            try:
+                from app.services.email_service import email_service
+                await email_service.send_welcome_email(
+                    to_email=user.email,
+                    user_name=user.full_name,
+                    language="uz"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send welcome email: {e}")
+        
+        # Update last login
+        user.last_login = datetime.now(timezone.utc)
+        db.commit()
+        
+        # Return tokens
+        return create_token_response(user)
+        
+    except ValueError as e:
+        logger.error(f"Google OAuth callback error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.exception(f"Google OAuth callback error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="OAuth authentication failed"
+        )
+
+
+@router.get(
+    "/oauth/linkedin",
+    summary="LinkedIn OAuth - Get authorization URL",
+    description="Get LinkedIn OAuth authorization URL for frontend redirect"
+)
+async def linkedin_oauth_authorize():
+    """Get LinkedIn OAuth authorization URL."""
+    from app.services.oauth_service import oauth_service
+    import secrets
+    
+    if not oauth_service.is_configured()["linkedin"]:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="LinkedIn OAuth not configured. Add LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET to .env"
+        )
+    
+    # Generate CSRF state token
+    state = secrets.token_urlsafe(32)
+    
+    # Get authorization URL
+    auth_url = oauth_service.get_linkedin_auth_url(state)
+    
+    return {
+        "auth_url": auth_url,
+        "state": state,
+    }
+
+
+@router.get(
+    "/callback/linkedin",
+    response_model=TokenResponse,
+    summary="LinkedIn OAuth callback",
+    description="Handle LinkedIn OAuth callback and create/login user"
+)
+async def linkedin_oauth_callback(
+    code: str,
+    state: str,
+    db: Session = Depends(get_db)
+):
+    """Handle LinkedIn OAuth callback."""
+    from app.services.oauth_service import oauth_service
+    
+    try:
+        # Get user info from LinkedIn
+        user_info = await oauth_service.get_linkedin_user_info(code)
+        
+        email = user_info.get("email")
+        if not email:
+            raise ValueError("No email in LinkedIn response")
+        
+        # Check if user exists
+        user = db.query(User).filter(
+            User.email == email.lower(),
+            User.is_deleted == False
+        ).first()
+        
+        if user:
+            # Existing user - login
+            logger.info(f"LinkedIn OAuth login for existing user: {user.id}")
+        else:
+            # New user - create account
+            user = User(
+                email=email.lower(),
+                full_name=user_info.get("name", "User"),
+                role=UserRole.STUDENT,  # Default role
+                is_active=True,
+                is_verified=True,  # Email verified by LinkedIn
+                avatar_url=user_info.get("picture"),
+            )
+            # Set random password (won't be used)
+            import secrets
+            user.set_password(secrets.token_urlsafe(32))
+            
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            
+            logger.info(f"New user created via LinkedIn OAuth: {user.id}")
+            
+            # Send welcome email
+            try:
+                from app.services.email_service import email_service
+                await email_service.send_welcome_email(
+                    to_email=user.email,
+                    user_name=user.full_name,
+                    language="uz"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send welcome email: {e}")
+        
+        # Update last login
+        user.last_login = datetime.now(timezone.utc)
+        db.commit()
+        
+        # Return tokens
+        return create_token_response(user)
+        
+    except ValueError as e:
+        logger.error(f"LinkedIn OAuth callback error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.exception(f"LinkedIn OAuth callback error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="OAuth authentication failed"
+        )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

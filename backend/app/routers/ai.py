@@ -1,0 +1,527 @@
+"""
+=============================================================================
+AI Router - API Endpoints for AI Features
+=============================================================================
+
+This file defines all the API endpoints (routes) for AI-powered features.
+These endpoints call the AI service to generate resumes, analyze content, etc.
+
+ENDPOINTS:
+    POST /api/ai/generate-resume     - Generate a new resume with AI
+    POST /api/ai/analyze-resume      - Analyze an existing resume
+    POST /api/ai/generate-cover-letter - Generate a cover letter
+    POST /api/ai/match-job           - Match resume to job description
+    GET  /api/ai/usage               - Get API usage statistics
+    GET  /api/ai/health              - Check AI service health
+"""
+
+from fastapi import APIRouter, HTTPException, status, Body
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+import logging
+
+from app.config import settings
+
+# Try to import AI services
+try:
+    from app.services.ai_service import (
+        AIService, 
+        AIServiceError, 
+        AIGenerationError, 
+        AIRateLimitError,
+        AIConfigurationError
+    )
+    OPENAI_AVAILABLE = True
+except Exception as e:
+    OPENAI_AVAILABLE = False
+    AIService = None
+
+try:
+    from app.services.gemini_service import gemini_service
+    GEMINI_AVAILABLE = gemini_service.is_available
+except Exception as e:
+    GEMINI_AVAILABLE = False
+    gemini_service = None
+
+# Set up logging
+logger = logging.getLogger(__name__)
+
+# Create the router with a prefix and tags for documentation
+router = APIRouter()
+
+# Determine which AI provider to use
+AI_PROVIDER = getattr(settings, 'AI_PROVIDER', 'gemini')
+logger.info(f"🤖 AI Provider: {AI_PROVIDER}")
+logger.info(f"   Gemini available: {GEMINI_AVAILABLE}")
+logger.info(f"   OpenAI available: {OPENAI_AVAILABLE}")
+
+# Create OpenAI service instance if needed
+ai_service = None
+if AI_PROVIDER == 'openai' and OPENAI_AVAILABLE:
+    try:
+        ai_service = AIService()
+    except Exception as e:
+        logger.error(f"Failed to initialize OpenAI service: {e}")
+        ai_service = None
+
+
+# =============================================================================
+# REQUEST/RESPONSE MODELS
+# =============================================================================
+# These Pydantic models define the expected request body and response format
+
+class ResumeGenerateRequest(BaseModel):
+    """Request model for resume generation."""
+    
+    job_title: str = Field(
+        ...,  # ... means required
+        min_length=2,
+        max_length=100,
+        description="Target job title (e.g., 'Software Engineer')",
+        examples=["Software Engineer", "Product Manager", "Data Scientist"]
+    )
+    
+    years_experience: int = Field(
+        ...,
+        ge=0,  # greater than or equal to 0
+        le=50,  # less than or equal to 50
+        description="Years of professional experience"
+    )
+    
+    skills: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description="List of key skills to highlight",
+        examples=[["Python", "React", "AWS", "Docker"]]
+    )
+    
+    education_level: str = Field(
+        default="Bachelor's",
+        description="Highest education level",
+        examples=["High School", "Bachelor's", "Master's", "PhD"]
+    )
+    
+    field_of_study: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Field of study or major"
+    )
+    
+    target_company: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Company you're applying to (for tailored content)"
+    )
+    
+    job_description: Optional[str] = Field(
+        default=None,
+        max_length=5000,
+        description="Full job description to tailor resume to"
+    )
+    
+    include_projects: bool = Field(
+        default=True,
+        description="Whether to include a projects section"
+    )
+    
+    tone: str = Field(
+        default="professional",
+        description="Writing tone for the resume",
+        examples=["professional", "creative", "technical"]
+    )
+    
+    additional_info: Optional[str] = Field(
+        default=None,
+        max_length=1000,
+        description="Any additional context or requirements"
+    )
+
+
+class ResumeAnalyzeRequest(BaseModel):
+    """Request model for resume analysis."""
+    
+    resume_text: str = Field(
+        ...,
+        min_length=100,
+        max_length=20000,
+        description="Plain text content of the resume to analyze"
+    )
+
+
+class CoverLetterRequest(BaseModel):
+    """Request model for cover letter generation."""
+    
+    resume_text: str = Field(
+        ...,
+        min_length=100,
+        max_length=20000,
+        description="The candidate's resume text"
+    )
+    
+    job_description: str = Field(
+        ...,
+        min_length=50,
+        max_length=10000,
+        description="The job posting description"
+    )
+    
+    company_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="Name of the company"
+    )
+    
+    hiring_manager: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="Name of the hiring manager (if known)"
+    )
+    
+    tone: str = Field(
+        default="professional",
+        description="Writing tone",
+        examples=["professional", "enthusiastic", "creative"]
+    )
+
+
+class JobMatchRequest(BaseModel):
+    """Request model for job matching."""
+    
+    resume_text: str = Field(
+        ...,
+        min_length=100,
+        max_length=20000,
+        description="The candidate's resume text"
+    )
+    
+    job_description: str = Field(
+        ...,
+        min_length=50,
+        max_length=10000,
+        description="The job posting description"
+    )
+
+
+# =============================================================================
+# HELPER FUNCTION - Check if AI service is available
+# =============================================================================
+
+def get_ai_service():
+    """
+    Get the appropriate AI service based on configuration.
+    Supports both Gemini (free!) and OpenAI.
+    """
+    # First try Gemini (it's free!)
+    if AI_PROVIDER == 'gemini' and GEMINI_AVAILABLE:
+        return gemini_service
+    
+    # Fall back to OpenAI
+    if ai_service is not None:
+        return ai_service
+    
+    # No AI service available
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "error": "AI Service Unavailable",
+            "message": "No AI service is configured. Please set either "
+                      "GEMINI_API_KEY (free!) or OPENAI_API_KEY in .env file. "
+                      "Get free Gemini key at: https://ai.google.dev/",
+            "code": "AI_SERVICE_UNAVAILABLE"
+        }
+    )
+
+
+# =============================================================================
+# API ENDPOINTS
+# =============================================================================
+
+@router.post(
+    "/generate-resume",
+    response_model=Dict[str, Any],
+    summary="Generate a Resume with AI",
+    description="Generate a complete professional resume using AI (Gemini - FREE or OpenAI)."
+)
+async def generate_resume(request: ResumeGenerateRequest):
+    """
+    Generate a professional resume using AI.
+    
+    Supports both:
+    - 🌟 Google Gemini (FREE!)
+    - 💎 OpenAI GPT-4 (paid)
+    
+    **Request Body:**
+    - `job_title`: Target position (required)
+    - `years_experience`: Years of experience (required)
+    - `skills`: List of skills (required)
+    - `education_level`: Highest education (optional)
+    - `target_company`: Company name for tailoring (optional)
+    - `job_description`: Full JD for better tailoring (optional)
+    """
+    service = get_ai_service()
+    
+    try:
+        # Prepare user data for AI
+        user_data = {
+            "job_title": request.job_title,
+            "years_experience": request.years_experience,
+            "skills": request.skills,
+            "education_level": request.education_level,
+            "field_of_study": request.field_of_study,
+            "target_company": request.target_company,
+            "job_description": request.job_description,
+            "include_projects": request.include_projects,
+            "tone": request.tone,
+            "additional_info": request.additional_info
+        }
+        
+        # Check if using Gemini or OpenAI
+        if hasattr(service, 'generate_resume') and AI_PROVIDER == 'gemini':
+            # Use Gemini service
+            result = await service.generate_resume(user_data)
+            
+            if not result.get("success"):
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "error": "Generation Failed",
+                        "message": result.get("error", "Unknown error"),
+                        "code": "GENERATION_ERROR"
+                    }
+                )
+            
+            return {
+                "success": True,
+                "data": result.get("resume"),
+                "message": "Resume generated successfully with Gemini (FREE!)",
+                "provider": "gemini"
+            }
+        else:
+            # Use OpenAI service
+            result = await service.generate_resume(
+                job_title=request.job_title,
+                years_experience=request.years_experience,
+                skills=request.skills,
+                education_level=request.education_level,
+                field_of_study=request.field_of_study,
+                target_company=request.target_company,
+                job_description=request.job_description,
+                include_projects=request.include_projects,
+                tone=request.tone,
+                additional_info=request.additional_info
+            )
+            
+            return {
+                "success": True,
+                "data": result,
+                "message": "Resume generated successfully",
+                "provider": "openai"
+            }
+        
+    except HTTPException:
+        raise
+        
+    except Exception as e:
+        logger.exception(f"Unexpected error in resume generation: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "Internal Error",
+                "message": str(e),
+                "code": "INTERNAL_ERROR"
+            }
+        )
+
+
+@router.post(
+    "/analyze-resume",
+    response_model=Dict[str, Any],
+    summary="Analyze a Resume",
+    description="Analyze an existing resume for ATS compatibility, skills, and improvements."
+)
+async def analyze_resume(request: ResumeAnalyzeRequest):
+    """
+    Analyze a resume and provide detailed feedback.
+    
+    This endpoint evaluates a resume and returns:
+    - ATS compatibility score (0-100)
+    - Extracted skills
+    - Strengths and weaknesses
+    - Specific improvement suggestions
+    
+    **Example Response:**
+    ```json
+    {
+        "success": true,
+        "data": {
+            "ats_score": 75,
+            "skills_extracted": ["Python", "React", "AWS"],
+            "strengths": ["Strong technical skills", "Good metrics"],
+            "improvement_suggestions": ["Add more quantifiable achievements"]
+        }
+    }
+    ```
+    """
+    service = get_ai_service()
+    
+    try:
+        result = await service.analyze_resume(request.resume_text)
+        
+        return {
+            "success": True,
+            "data": result,
+            "message": "Resume analyzed successfully"
+        }
+        
+    except AIGenerationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Analysis Failed", "message": str(e)}
+        )
+
+
+@router.post(
+    "/generate-cover-letter",
+    response_model=Dict[str, Any],
+    summary="Generate a Cover Letter",
+    description="Generate a tailored cover letter based on resume and job description."
+)
+async def generate_cover_letter(request: CoverLetterRequest):
+    """
+    Generate a personalized cover letter.
+    
+    Creates a compelling cover letter that:
+    - Matches the candidate's experience to the job requirements
+    - Uses appropriate tone and style
+    - Includes specific achievements from the resume
+    """
+    service = get_ai_service()
+    
+    try:
+        cover_letter = await service.generate_cover_letter(
+            resume_text=request.resume_text,
+            job_description=request.job_description,
+            company_name=request.company_name,
+            hiring_manager=request.hiring_manager,
+            tone=request.tone
+        )
+        
+        return {
+            "success": True,
+            "data": {"cover_letter": cover_letter},
+            "message": "Cover letter generated successfully"
+        }
+        
+    except AIGenerationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Generation Failed", "message": str(e)}
+        )
+
+
+@router.post(
+    "/match-job",
+    response_model=Dict[str, Any],
+    summary="Match Resume to Job",
+    description="Analyze how well a resume matches a specific job description."
+)
+async def match_job(request: JobMatchRequest):
+    """
+    Analyze resume-job fit.
+    
+    Returns:
+    - Match score (0-100)
+    - Matching skills
+    - Missing skills
+    - Recommendations for improving match
+    """
+    service = get_ai_service()
+    
+    try:
+        result = await service.match_resume_to_job(
+            resume_text=request.resume_text,
+            job_description=request.job_description
+        )
+        
+        return {
+            "success": True,
+            "data": result,
+            "message": "Match analysis complete"
+        }
+        
+    except AIGenerationError as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Analysis Failed", "message": str(e)}
+        )
+
+
+@router.get(
+    "/usage",
+    response_model=Dict[str, Any],
+    summary="Get API Usage Statistics",
+    description="Get token usage and cost estimates for the current session."
+)
+async def get_usage():
+    """
+    Get AI API usage statistics.
+    
+    Returns information about:
+    - Total tokens used
+    - Number of requests made
+    - Estimated costs
+    - Recent request history
+    """
+    service = get_ai_service()
+    
+    return {
+        "success": True,
+        "data": service.get_usage_summary(),
+        "message": "Usage statistics retrieved"
+    }
+
+
+@router.get(
+    "/health",
+    response_model=Dict[str, Any],
+    summary="Health Check",
+    description="Check if the AI service is properly configured and operational."
+)
+async def health_check():
+    """
+    Check AI service health.
+    
+    Shows status of:
+    - 🌟 Gemini (FREE!)
+    - 💎 OpenAI
+    """
+    return {
+        "status": "healthy" if (GEMINI_AVAILABLE or ai_service) else "unhealthy",
+        "provider": AI_PROVIDER,
+        "gemini": {
+            "available": GEMINI_AVAILABLE,
+            "model": getattr(settings, 'GEMINI_MODEL', 'gemini-1.5-flash') if GEMINI_AVAILABLE else None,
+            "free": True
+        },
+        "openai": {
+            "available": ai_service is not None,
+            "model": getattr(settings, 'OPENAI_MODEL', None) if ai_service else None,
+            "free": False
+        },
+        "help": "Get free Gemini API key at: https://ai.google.dev/" if not GEMINI_AVAILABLE else None
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
