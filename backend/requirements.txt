@@ -18,8 +18,15 @@ psycopg2-binary==2.9.9    # PostgreSQL adapter for Python
 alembic==1.12.1           # Database migration tool
 
 # -----------------------------------------------------------------------------
+# Build Tools (Render.com uchun)
+# -----------------------------------------------------------------------------
+setuptools>=68.0.0
+wheel>=0.41.0
+
+# -----------------------------------------------------------------------------
 # Authentication & Security
 # -----------------------------------------------------------------------------
+cryptography>=41.0.0              # Pre-built wheel (Rust muammosini hal qiladi)
 python-jose[cryptography]==3.3.0  # JWT token handling
 passlib[bcrypt]==1.7.4            # Password hashing
 bcrypt==4.1.1                     # Bcrypt algorithm
