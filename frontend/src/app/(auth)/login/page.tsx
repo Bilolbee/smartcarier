@@ -112,6 +112,18 @@ export default function LoginPage() {
     }
   };
 
+  const handleGoogleOAuth = () => {
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+    const backendOrigin = apiBase.replace(/\/api\/v1\/?$/, "");
+    window.location.href = `${backendOrigin}/api/v1/auth/oauth/google?redirect=true`;
+  };
+
+  const handleLinkedInOAuth = () => {
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+    const backendOrigin = apiBase.replace(/\/api\/v1\/?$/, "");
+    window.location.href = `${backendOrigin}/api/v1/auth/oauth/linkedin?redirect=true`;
+  };
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -315,6 +327,7 @@ export default function LoginPage() {
         {/* Google */}
         <button
           type="button"
+          onClick={handleGoogleOAuth}
           className="flex h-12 items-center justify-center gap-2 rounded-xl border-2 border-surface-200 bg-white font-medium text-surface-700 transition-all hover:border-surface-300 hover:bg-surface-50"
         >
           <svg className="h-5 w-5" viewBox="0 0 24 24">
@@ -341,6 +354,7 @@ export default function LoginPage() {
         {/* LinkedIn */}
         <button
           type="button"
+          onClick={handleLinkedInOAuth}
           className="flex h-12 items-center justify-center gap-2 rounded-xl border-2 border-surface-200 bg-white font-medium text-surface-700 transition-all hover:border-surface-300 hover:bg-surface-50"
         >
           <svg className="h-5 w-5" fill="#0A66C2" viewBox="0 0 24 24">

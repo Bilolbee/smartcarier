@@ -1,341 +1,168 @@
 /**
  * =============================================================================
- * useAuth Hook
+ * useAuth Hook (REAL BACKEND)
  * =============================================================================
  *
- * Custom hook for authentication operations
+ * Single source of truth: Zustand `useAuthStore`.
+ * Pages/components use this hook for routing + convenience helpers.
  */
 
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
+import type { User } from "@/types/api";
+import { useAuthStore } from "@/store/authStore";
 
-// =============================================================================
-// TYPES
-// =============================================================================
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
-interface User {
-  id: string;
-  email: string;
-  full_name: string;
-  phone?: string;
-  role: "student" | "company" | "admin";
-  is_active: boolean;
-  is_verified: boolean;
-  avatar_url?: string;
-  company_name?: string;
-  created_at: string;
+async function parseApiError(res: Response): Promise<string> {
+  try {
+    const data = await res.json();
+    if (typeof data?.detail === "string") return data.detail;
+    if (typeof data?.message === "string") return data.message;
+    return `Request failed (${res.status})`;
+  } catch {
+    return `Request failed (${res.status})`;
+  }
 }
-
-interface AuthState {
-  user: User | null;
-  isAuthenticated: boolean;
-  isLoading: boolean;
-  error: string | null;
-}
-
-interface LoginCredentials {
-  email: string;
-  password: string;
-}
-
-interface RegisterData {
-  email: string;
-  password: string;
-  full_name: string;
-  phone?: string;
-  role?: "student" | "company";
-}
-
-// =============================================================================
-// MOCK DATA (Replace with real API calls)
-// =============================================================================
-
-const mockUser: User = {
-  id: "user-1",
-  email: "john@example.com",
-  full_name: "John Doe",
-  phone: "+998901234567",
-  role: "student",
-  is_active: true,
-  is_verified: true,
-  avatar_url: undefined,
-  created_at: "2024-01-01T00:00:00Z",
-};
-
-// =============================================================================
-// HOOK
-// =============================================================================
-
-// =============================================================================
-// useRequireAuth Hook - Protected route check
-// =============================================================================
 
 export function useRequireAuth(requiredRole?: "student" | "company" | "admin") {
   const router = useRouter();
-  const [isLoading, setIsLoading] = useState(true);
-  const [isAuthorized, setIsAuthorized] = useState(false);
+  const { isAuthenticated, user } = useAuthStore();
 
+  // Lightweight client-side gate (server-side protection is still on API).
   useEffect(() => {
-    const checkAuth = async () => {
-      try {
-        const token = localStorage.getItem("access_token");
-        
-        // For demo purposes, always authorize
-        // In real app, verify token and check role
-        if (true) { // Demo mode - always authorized
-          setIsAuthorized(true);
-        } else if (!token) {
-          router.push("/login");
-          return;
-        }
-        
-        // In real app, verify role matches
-        // if (requiredRole && user.role !== requiredRole) {
-        //   router.push("/unauthorized");
-        //   return;
-        // }
-        
-        setIsAuthorized(true);
-      } catch (error) {
-        router.push("/login");
-      } finally {
-        setIsLoading(false);
-      }
-    };
+    if (!isAuthenticated) {
+      router.replace("/login?session_expired=true");
+      return;
+    }
+    if (requiredRole && user?.role && user.role !== requiredRole) {
+      const roleRoot = user.role === "company" ? "/company" : user.role === "admin" ? "/admin" : "/student";
+      router.replace(roleRoot);
+    }
+  }, [isAuthenticated, requiredRole, router, user?.role]);
 
-    checkAuth();
-  }, [router, requiredRole]);
-
-  return { isLoading, isAuthorized };
+  return { isLoading: false, isAuthorized: !!isAuthenticated };
 }
-
-// =============================================================================
-// useAuth Hook - Main authentication hook
-// =============================================================================
 
 export function useAuth() {
   const router = useRouter();
-  const [state, setState] = useState<AuthState>({
-    user: mockUser, // Start with mock user for demo
-    isAuthenticated: true,
-    isLoading: false,
-    error: null,
-  });
 
-  // Check authentication on mount
-  useEffect(() => {
-    const checkAuth = async () => {
-      setState((prev) => ({ ...prev, isLoading: true }));
+  const user = useAuthStore((s) => s.user);
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const refreshToken = useAuthStore((s) => s.refreshToken);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isLoading = useAuthStore((s) => s.isLoading);
+  const error = useAuthStore((s) => s.error);
+  const clearError = useAuthStore((s) => s.clearError);
 
-      try {
-        // Check for stored token
-        const token = localStorage.getItem("access_token");
-        if (token) {
-          // In real app, verify token with API
-          setState({
-            user: mockUser,
-            isAuthenticated: true,
-            isLoading: false,
-            error: null,
-          });
-        } else {
-          setState({
-            user: mockUser, // Keep mock user for demo
-            isAuthenticated: true,
-            isLoading: false,
-            error: null,
-          });
-        }
-      } catch (error) {
-        setState({
-          user: null,
-          isAuthenticated: false,
-          isLoading: false,
-          error: "Failed to authenticate",
-        });
-      }
-    };
+  const storeLogin = useAuthStore((s) => s.login);
+  const storeRegister = useAuthStore((s) => s.register);
+  const storeLogout = useAuthStore((s) => s.logout);
+  const updateProfile = useAuthStore((s) => s.updateProfile);
 
-    checkAuth();
-  }, []);
+  const login = useCallback(
+    async (credentials: { email: string; password: string }, redirectTo?: string) => {
+      await storeLogin(credentials.email, credentials.password);
+      const role = useAuthStore.getState().user?.role;
+      const roleRoot = role === "company" ? "/company" : role === "admin" ? "/admin" : "/student";
+      router.push(redirectTo || roleRoot);
+    },
+    [router, storeLogin]
+  );
 
-  // Login
-  const login = useCallback(async (credentials: LoginCredentials) => {
-    setState((prev) => ({ ...prev, isLoading: true, error: null }));
+  const register = useCallback(
+    async (data: {
+      email: string;
+      password: string;
+      full_name: string;
+      phone?: string;
+      role?: "student" | "company";
+      company_name?: string;
+    }) => {
+      await storeRegister(data as any);
+    },
+    [storeRegister]
+  );
 
-    try {
-      // Simulate API call
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      // In real app, call login API
-      // const response = await api.post('/auth/login', credentials);
-
-      // Store tokens
-      localStorage.setItem("access_token", "mock_access_token");
-      localStorage.setItem("refresh_token", "mock_refresh_token");
-
-      setState({
-        user: mockUser,
-        isAuthenticated: true,
-        isLoading: false,
-        error: null,
-      });
-
-      // Redirect based on role
-      router.push("/student");
-    } catch (error) {
-      setState((prev) => ({
-        ...prev,
-        isLoading: false,
-        error: "Invalid credentials",
-      }));
-      throw error;
-    }
-  }, [router]);
-
-  // Register
-  const register = useCallback(async (data: RegisterData) => {
-    setState((prev) => ({ ...prev, isLoading: true, error: null }));
-
-    try {
-      // Simulate API call
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      // In real app, call register API
-      // const response = await api.post('/auth/register', data);
-
-      setState((prev) => ({
-        ...prev,
-        isLoading: false,
-      }));
-
-      // Redirect to login
-      router.push("/login?registered=true");
-    } catch (error) {
-      setState((prev) => ({
-        ...prev,
-        isLoading: false,
-        error: "Registration failed",
-      }));
-      throw error;
-    }
-  }, [router]);
-
-  // Logout
   const logout = useCallback(async () => {
-    setState((prev) => ({ ...prev, isLoading: true }));
+    await storeLogout();
+    router.push("/login");
+  }, [router, storeLogout]);
 
-    try {
-      // Clear tokens
-      localStorage.removeItem("access_token");
-      localStorage.removeItem("refresh_token");
-
-      setState({
-        user: null,
-        isAuthenticated: false,
-        isLoading: false,
-        error: null,
-      });
-
-      router.push("/login");
-    } catch (error) {
-      console.error("Logout error:", error);
-    }
-  }, [router]);
-
-  // Update user
-  const updateUser = useCallback(async (data: Partial<User>) => {
-    setState((prev) => ({ ...prev, isLoading: true, error: null }));
-
-    try {
-      // Simulate API call
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      // Update user state
-      setState((prev) => ({
-        ...prev,
-        user: prev.user ? { ...prev.user, ...data } : null,
-        isLoading: false,
-      }));
-    } catch (error) {
-      setState((prev) => ({
-        ...prev,
-        isLoading: false,
-        error: "Failed to update profile",
-      }));
-      throw error;
-    }
-  }, []);
-
-  // Change password
   const changePassword = useCallback(async (oldPassword: string, newPassword: string) => {
-    setState((prev) => ({ ...prev, isLoading: true, error: null }));
+    const token = useAuthStore.getState().accessToken;
+    if (!token) throw new Error("Not authenticated");
 
-    try {
-      // Simulate API call
-      await new Promise((resolve) => setTimeout(resolve, 500));
+    const res = await fetch(`${API_BASE_URL}/auth/change-password`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ current_password: oldPassword, new_password: newPassword }),
+    });
 
-      setState((prev) => ({
-        ...prev,
-        isLoading: false,
-      }));
-    } catch (error) {
-      setState((prev) => ({
-        ...prev,
-        isLoading: false,
-        error: "Failed to change password",
-      }));
-      throw error;
+    if (!res.ok) {
+      throw new Error(await parseApiError(res));
     }
   }, []);
 
-  // Reset password request
   const requestPasswordReset = useCallback(async (email: string) => {
-    setState((prev) => ({ ...prev, isLoading: true, error: null }));
+    const res = await fetch(`${API_BASE_URL}/auth/forgot-password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
 
-    try {
-      // Simulate API call
-      await new Promise((resolve) => setTimeout(resolve, 500));
-
-      setState((prev) => ({
-        ...prev,
-        isLoading: false,
-      }));
-    } catch (error) {
-      setState((prev) => ({
-        ...prev,
-        isLoading: false,
-        error: "Failed to send reset email",
-      }));
-      throw error;
+    if (!res.ok) {
+      throw new Error(await parseApiError(res));
     }
   }, []);
 
-  // Clear error
-  const clearError = useCallback(() => {
-    setState((prev) => ({ ...prev, error: null }));
-  }, []);
+  const isStudent = user?.role === "student";
+  const isCompany = user?.role === "company";
+  const isAdmin = user?.role === "admin";
 
-  // Role checks
-  const isStudent = state.user?.role === "student";
-  const isCompany = state.user?.role === "company";
-  const isAdmin = state.user?.role === "admin";
-
-  return {
-    ...state,
-    login,
-    register,
-    logout,
-    updateUser,
-    changePassword,
-    requestPasswordReset,
-    clearError,
-    isStudent,
-    isCompany,
-    isAdmin,
-  };
+  return useMemo(
+    () => ({
+      user: user as User | null,
+      accessToken,
+      refreshToken,
+      isAuthenticated,
+      isLoading,
+      error,
+      clearError,
+      login,
+      register,
+      logout,
+      updateUser: updateProfile,
+      changePassword,
+      requestPasswordReset,
+      isStudent,
+      isCompany,
+      isAdmin,
+    }),
+    [
+      user,
+      accessToken,
+      refreshToken,
+      isAuthenticated,
+      isLoading,
+      error,
+      clearError,
+      login,
+      register,
+      logout,
+      updateProfile,
+      changePassword,
+      requestPasswordReset,
+      isStudent,
+      isCompany,
+      isAdmin,
+    ]
+  );
 }
 
 export default useAuth;

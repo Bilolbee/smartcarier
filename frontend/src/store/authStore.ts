@@ -16,6 +16,24 @@ import { immer } from "zustand/middleware/immer";
 import type { User } from "@/types/api";
 
 // =============================================================================
+// API CONFIG
+// =============================================================================
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+
+async function parseApiError(res: Response): Promise<string> {
+  try {
+    const data = await res.json();
+    if (typeof data?.detail === "string") return data.detail;
+    if (typeof data?.message === "string") return data.message;
+    if (typeof data?.error?.message === "string") return data.error.message;
+    return `Request failed (${res.status})`;
+  } catch {
+    return `Request failed (${res.status})`;
+  }
+}
+
+// =============================================================================
 // TYPES
 // =============================================================================
 
@@ -33,7 +51,7 @@ interface AuthState {
   setTokens: (accessToken: string, refreshToken: string) => void;
   login: (email: string, password: string) => Promise<void>;
   register: (data: RegisterData) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   refreshAccessToken: () => Promise<string | null>;
   updateProfile: (data: Partial<User>) => Promise<void>;
   clearError: () => void;
@@ -85,25 +103,23 @@ export const useAuthStore = create<AuthState>()(
         });
 
         try {
-          // Simulate API call
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+          const res = await fetch(`${API_BASE_URL}/auth/login`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+          });
 
-          // Mock response
-          const mockUser: User = {
-            id: "user-1",
-            email,
-            full_name: "John Doe",
-            phone: "+998901234567",
-            role: "student",
-            is_active: true,
-            is_verified: true,
-            created_at: new Date().toISOString(),
-          };
+          if (!res.ok) {
+            const msg = await parseApiError(res);
+            throw new Error(msg);
+          }
+
+          const data = await res.json();
 
           set((state) => {
-            state.user = mockUser;
-            state.accessToken = "mock_access_token_" + Date.now();
-            state.refreshToken = "mock_refresh_token_" + Date.now();
+            state.user = data.user;
+            state.accessToken = data.access_token;
+            state.refreshToken = data.refresh_token;
             state.isAuthenticated = true;
             state.isLoading = false;
           });
@@ -124,11 +140,24 @@ export const useAuthStore = create<AuthState>()(
         });
 
         try {
-          // Simulate API call
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+          const res = await fetch(`${API_BASE_URL}/auth/register`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data),
+          });
 
-          // In real app, would call API
+          if (!res.ok) {
+            const msg = await parseApiError(res);
+            throw new Error(msg);
+          }
+
+          const resp = await res.json();
+
           set((state) => {
+            state.user = resp.user;
+            state.accessToken = resp.access_token;
+            state.refreshToken = resp.refresh_token;
+            state.isAuthenticated = true;
             state.isLoading = false;
           });
         } catch (error: any) {
@@ -141,14 +170,39 @@ export const useAuthStore = create<AuthState>()(
       },
 
       // Logout
-      logout: () =>
+      logout: async () => {
+        const { accessToken, refreshToken } = get();
         set((state) => {
-          state.user = null;
-          state.accessToken = null;
-          state.refreshToken = null;
-          state.isAuthenticated = false;
+          state.isLoading = true;
           state.error = null;
-        }),
+        });
+
+        try {
+          // Best-effort server logout (token blacklist). Even if it fails,
+          // we still clear local state.
+          if (accessToken) {
+            await fetch(`${API_BASE_URL}/auth/logout`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${accessToken}`,
+              },
+              body: JSON.stringify({ refresh_token: refreshToken }),
+            });
+          }
+        } catch {
+          // ignore
+        } finally {
+          set((state) => {
+            state.user = null;
+            state.accessToken = null;
+            state.refreshToken = null;
+            state.isAuthenticated = false;
+            state.isLoading = false;
+            state.error = null;
+          });
+        }
+      },
 
       // Refresh access token
       refreshAccessToken: async () => {
@@ -156,19 +210,30 @@ export const useAuthStore = create<AuthState>()(
         if (!refreshToken) return null;
 
         try {
-          // Simulate API call
-          await new Promise((resolve) => setTimeout(resolve, 500));
-
-          const newAccessToken = "mock_access_token_refreshed_" + Date.now();
-          
-          set((state) => {
-            state.accessToken = newAccessToken;
+          const res = await fetch(`${API_BASE_URL}/auth/refresh`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh_token: refreshToken }),
           });
 
-          return newAccessToken;
+          if (!res.ok) {
+            const msg = await parseApiError(res);
+            throw new Error(msg);
+          }
+
+          const data = await res.json();
+
+          set((state) => {
+            state.user = data.user;
+            state.accessToken = data.access_token;
+            state.refreshToken = data.refresh_token;
+            state.isAuthenticated = true;
+          });
+
+          return data.access_token as string;
         } catch (error) {
           // If refresh fails, logout
-          get().logout();
+          await get().logout();
           return null;
         }
       },
@@ -181,13 +246,30 @@ export const useAuthStore = create<AuthState>()(
         });
 
         try {
-          // Simulate API call
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          const { accessToken } = get();
+          if (!accessToken) throw new Error("Not authenticated");
+
+          const res = await fetch(`${API_BASE_URL}/users/me`, {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify(data),
+          });
+
+          if (!res.ok) {
+            const msg = await parseApiError(res);
+            throw new Error(msg);
+          }
+
+          const updated = await res.json();
+
+          // Backend may return {success, user} or raw user; handle both
+          const user = updated.user ?? updated;
 
           set((state) => {
-            if (state.user) {
-              state.user = { ...state.user, ...data };
-            }
+            state.user = user;
             state.isLoading = false;
           });
         } catch (error: any) {

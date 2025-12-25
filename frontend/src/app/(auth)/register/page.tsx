@@ -41,6 +41,7 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { useTranslation } from "@/hooks/useTranslation";
+import { useAuthStore } from "@/store/authStore";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { LanguageSwitcher } from "@/components/ui/language-switcher";
@@ -314,7 +315,11 @@ export default function RegisterPage() {
       setIsSuccess(true);
       // Redirect after success animation
       setTimeout(() => {
-        router.push("/login?registered=true");
+        // After register, backend already returns tokens + user (auto-login)
+        // Redirect based on role
+        const userRole = useAuthStore.getState().user?.role;
+        const roleRoot = userRole === "company" ? "/company" : userRole === "admin" ? "/admin" : "/student";
+        router.push(roleRoot);
       }, 2000);
     } catch {
       // Error is already stored in state

@@ -35,7 +35,7 @@ import {
   ChevronRight,
   GraduationCap,
 } from "lucide-react";
-import { useAuth } from "@/hooks/useAuth";
+import { useAuth, useRequireAuth } from "@/hooks/useAuth";
 import { useTranslation } from "@/hooks/useTranslation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -137,6 +137,7 @@ export default function StudentDashboardLayout({
 }) {
   const pathname = usePathname();
   const { t } = useTranslation();
+  const { isAuthorized } = useRequireAuth("student");
   const { user, logout } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -154,6 +155,8 @@ export default function StudentDashboardLayout({
     if (exact) return pathname === href;
     return pathname.startsWith(href);
   };
+
+  if (!isAuthorized) return null;
 
   return (
     <div className="flex h-screen bg-surface-50 dark:bg-surface-900">
