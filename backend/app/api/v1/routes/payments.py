@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from app.core.dependencies import get_db, get_current_active_user
 from app.models import User
+from app.models.payment import Payment as PaymentModel
 from app.services.payment_service import (
     payment_service,
     PaymentProvider,
@@ -63,6 +64,11 @@ class CreatePaymentIntentRequest(BaseModel):
         ge=1,
         le=12,
         description="Number of months (1-12)"
+    )
+
+    idempotency_key: Optional[str] = Field(
+        default=None,
+        description="Client-generated idempotency key (recommended for retry safety)"
     )
     
     class Config:
@@ -138,14 +144,15 @@ async def create_payment_intent(
                 detail="Invalid subscription configuration"
             )
         
-        # Generate idempotency key
-        idempotency_key = f"{current_user.id}_{tier.value}_{request_data.subscription_months}_{uuid4().hex[:8]}"
+        # Idempotency key (client-provided recommended)
+        idempotency_key = request_data.idempotency_key or f"{current_user.id}_{tier.value}_{request_data.subscription_months}_{uuid4().hex[:12]}"
         
         # Get client IP
         client_ip = request.client.host if request.client else None
         
         # Create payment intent
         payment_intent = await payment_service.create_stripe_payment_intent(
+            db=db,
             user_id=str(current_user.id),
             user_email=current_user.email,
             amount=amount,
@@ -157,6 +164,7 @@ async def create_payment_intent(
             metadata={
                 "user_name": current_user.full_name,
                 "user_role": current_user.role.value,
+                "user_agent": request.headers.get("user-agent", ""),
             }
         )
         
@@ -196,7 +204,8 @@ async def create_payment_intent(
 )
 async def stripe_webhook(
     request: Request,
-    stripe_signature: Optional[str] = Header(None, alias="stripe-signature")
+    stripe_signature: Optional[str] = Header(None, alias="stripe-signature"),
+    db: Session = Depends(get_db),
 ):
     """Handle Stripe webhook events."""
     
@@ -213,6 +222,7 @@ async def stripe_webhook(
         
         # Process webhook
         result = await payment_service.handle_stripe_webhook(
+            db=db,
             payload=payload,
             signature=stripe_signature
         )
@@ -242,30 +252,31 @@ async def stripe_webhook(
     description="Get current user's payment history"
 )
 async def get_my_payments(
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
 ):
     """Get payment history for current user."""
     
     try:
-        payments = payment_service.get_payment_logs(
-            user_id=str(current_user.id),
-            limit=100
+        payments = (
+            db.query(PaymentModel)
+            .filter(PaymentModel.user_id == current_user.id)
+            .order_by(PaymentModel.created_at.desc())
+            .limit(100)
+            .all()
         )
-        
-        # Convert to dict for response
-        payments_data = [
-            {
-                "id": p.id,
-                "created_at": p.created_at.isoformat(),
-                "provider": p.provider.value,
-                "status": p.status.value,
-                "amount": p.amount,
-                "currency": p.currency,
-                "subscription_tier": p.subscription_tier.value,
-                "subscription_months": p.subscription_months,
-            }
-            for p in payments
-        ]
+
+        payments_data = [{
+            "id": str(p.id),
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+            "provider": p.provider,
+            "status": p.status,
+            "amount": p.amount,
+            "currency": p.currency,
+            "subscription_tier": p.subscription_tier,
+            "subscription_months": p.subscription_months,
+            "provider_payment_id": p.provider_payment_id,
+        } for p in payments]
         
         return PaymentHistoryResponse(
             success=True,
@@ -292,7 +303,7 @@ async def get_pricing():
     
     return PricingResponse(
         success=True,
-        pricing=SUBSCRIPTION_PRICING
+        pricing={k.value if hasattr(k, "value") else str(k): v for k, v in SUBSCRIPTION_PRICING.items()}
     )
 
 

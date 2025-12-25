@@ -193,6 +193,18 @@ class TokenRefreshRequest(BaseModel):
     )
 
 
+class LogoutRequest(BaseModel):
+    """
+    Optional logout payload.
+
+    If refresh_token is provided, backend will blacklist it too.
+    """
+    refresh_token: Optional[str] = Field(
+        default=None,
+        description="Optional refresh token to revoke on logout"
+    )
+
+
 class ForgotPasswordRequest(BaseModel):
     """Schema for forgot password."""
     
@@ -291,6 +303,8 @@ class UserResponse(BaseModel):
     location: Optional[str] = None
     company_name: Optional[str] = None
     company_website: Optional[str] = None
+    subscription_tier: Optional[str] = None
+    subscription_expires_at: Optional[datetime] = None
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)

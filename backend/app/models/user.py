@@ -85,6 +85,7 @@ if TYPE_CHECKING:
     from app.models.resume import Resume
     from app.models.job import Job
     from app.models.application import Application
+    from app.models.payment import Payment
 
 
 # =============================================================================
@@ -322,6 +323,31 @@ class User(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
         nullable=False,
         comment="Whether email address has been verified"
     )
+
+    # =========================================================================
+    # COLUMNS - SUBSCRIPTION / BILLING
+    # =========================================================================
+
+    # Current subscription tier (free/premium/enterprise)
+    subscription_tier = Column(
+        String(20),
+        nullable=False,
+        default="free",
+        index=True,
+        comment="Subscription tier: free, premium, enterprise"
+    )
+
+    subscription_expires_at = Column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="When premium access expires"
+    )
+
+    stripe_customer_id = Column(
+        String(255),
+        nullable=True,
+        comment="Stripe customer id (if payments enabled)"
+    )
     
     # =========================================================================
     # COLUMNS - TRACKING
@@ -368,6 +394,14 @@ class User(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
         cascade="all, delete-orphan",
         lazy="dynamic",
         foreign_keys="Application.user_id"
+    )
+
+    # Payments (audit trail)
+    payments = relationship(
+        "Payment",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="dynamic",
     )
     
     # =========================================================================

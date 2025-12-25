@@ -28,8 +28,10 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from urllib.parse import urlencode
 
 # Local imports
 from app.core.dependencies import get_db, get_current_user, get_current_active_user
@@ -50,6 +52,7 @@ from app.schemas.auth import (
     UserLogin,
     TokenResponse,
     TokenRefreshRequest,
+    LogoutRequest,
     ForgotPasswordRequest,
     ResetPasswordRequest,
     ChangePasswordRequest,
@@ -105,6 +108,8 @@ def create_token_response(user: User) -> TokenResponse:
         location=user.location,
         company_name=user.company_name,
         company_website=user.company_website,
+        subscription_tier=getattr(user, "subscription_tier", None),
+        subscription_expires_at=getattr(user, "subscription_expires_at", None),
         created_at=user.created_at,
     )
     
@@ -462,20 +467,32 @@ async def refresh_token(
     """
 )
 async def logout(
+    request: Request,
+    body: LogoutRequest | None = None,
     current_user: User = Depends(get_current_user),
-    # We need the actual token to blacklist it
 ):
     """Logout user by blacklisting token."""
-    
-    # Note: In a real implementation, we'd get the token from the request
-    # and blacklist it. For now, this is a placeholder.
-    
+
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    token = None
+    if auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+
+    if token:
+        try:
+            blacklist_token(token)
+        except Exception as e:
+            logger.warning(f"Failed to blacklist access token: {e}")
+
+    if body and body.refresh_token:
+        try:
+            blacklist_token(body.refresh_token)
+        except Exception as e:
+            logger.warning(f"Failed to blacklist refresh token: {e}")
+
     logger.info(f"Logout for user: {current_user.id}")
-    
-    return MessageResponse(
-        message="Successfully logged out",
-        success=True
-    )
+
+    return MessageResponse(message="Successfully logged out", success=True)
 
 
 @router.post(
@@ -678,10 +695,15 @@ async def get_current_user_profile(
     summary="Google OAuth - Get authorization URL",
     description="Get Google OAuth authorization URL for frontend redirect"
 )
-async def google_oauth_authorize():
-    """Get Google OAuth authorization URL."""
+async def google_oauth_authorize(redirect: bool = False):
+    """
+    Get Google OAuth authorization URL.
+
+    If redirect=true, this endpoint will directly redirect the browser to Google.
+    """
     from app.services.oauth_service import oauth_service
     import secrets
+    from app.core.redis_client import get_redis
     
     if not oauth_service.is_configured()["google"]:
         raise HTTPException(
@@ -691,9 +713,24 @@ async def google_oauth_authorize():
     
     # Generate CSRF state token
     state = secrets.token_urlsafe(32)
+
+    # Store state for CSRF validation (Redis preferred)
+    try:
+        redis_client = get_redis()
+        if redis_client:
+            redis_client.set(
+                f"oauth_state:google:{state}",
+                "1",
+                ex=settings.OAUTH_STATE_TTL_SECONDS,
+            )
+    except Exception as e:
+        logger.warning(f"Failed to store OAuth state (google): {e}")
     
     # Get authorization URL
     auth_url = oauth_service.get_google_auth_url(state)
+
+    if redirect:
+        return RedirectResponse(url=auth_url)
     
     return {
         "auth_url": auth_url,
@@ -703,7 +740,6 @@ async def google_oauth_authorize():
 
 @router.get(
     "/callback/google",
-    response_model=TokenResponse,
     summary="Google OAuth callback",
     description="Handle Google OAuth callback and create/login user"
 )
@@ -714,8 +750,17 @@ async def google_oauth_callback(
 ):
     """Handle Google OAuth callback."""
     from app.services.oauth_service import oauth_service
+    from app.core.redis_client import get_redis
     
     try:
+        # Validate CSRF state
+        redis_client = get_redis()
+        if redis_client:
+            state_key = f"oauth_state:google:{state}"
+            if not redis_client.exists(state_key):
+                raise ValueError("Invalid or expired OAuth state")
+            redis_client.delete(state_key)
+
         # Get user info from Google
         user_info = await oauth_service.get_google_user_info(code)
         
@@ -766,9 +811,16 @@ async def google_oauth_callback(
         # Update last login
         user.last_login = datetime.now(timezone.utc)
         db.commit()
-        
-        # Return tokens
-        return create_token_response(user)
+
+        # Redirect to frontend with tokens in fragment (not sent to server logs)
+        token_response = create_token_response(user)
+        fragment = urlencode(
+            {
+                "access_token": token_response.access_token,
+                "refresh_token": token_response.refresh_token,
+            }
+        )
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/oauth/callback#{fragment}")
         
     except ValueError as e:
         logger.error(f"Google OAuth callback error: {e}")
@@ -789,10 +841,15 @@ async def google_oauth_callback(
     summary="LinkedIn OAuth - Get authorization URL",
     description="Get LinkedIn OAuth authorization URL for frontend redirect"
 )
-async def linkedin_oauth_authorize():
-    """Get LinkedIn OAuth authorization URL."""
+async def linkedin_oauth_authorize(redirect: bool = False):
+    """
+    Get LinkedIn OAuth authorization URL.
+
+    If redirect=true, this endpoint will directly redirect the browser to LinkedIn.
+    """
     from app.services.oauth_service import oauth_service
     import secrets
+    from app.core.redis_client import get_redis
     
     if not oauth_service.is_configured()["linkedin"]:
         raise HTTPException(
@@ -802,9 +859,24 @@ async def linkedin_oauth_authorize():
     
     # Generate CSRF state token
     state = secrets.token_urlsafe(32)
+
+    # Store state for CSRF validation
+    try:
+        redis_client = get_redis()
+        if redis_client:
+            redis_client.set(
+                f"oauth_state:linkedin:{state}",
+                "1",
+                ex=settings.OAUTH_STATE_TTL_SECONDS,
+            )
+    except Exception as e:
+        logger.warning(f"Failed to store OAuth state (linkedin): {e}")
     
     # Get authorization URL
     auth_url = oauth_service.get_linkedin_auth_url(state)
+
+    if redirect:
+        return RedirectResponse(url=auth_url)
     
     return {
         "auth_url": auth_url,
@@ -814,7 +886,6 @@ async def linkedin_oauth_authorize():
 
 @router.get(
     "/callback/linkedin",
-    response_model=TokenResponse,
     summary="LinkedIn OAuth callback",
     description="Handle LinkedIn OAuth callback and create/login user"
 )
@@ -825,8 +896,17 @@ async def linkedin_oauth_callback(
 ):
     """Handle LinkedIn OAuth callback."""
     from app.services.oauth_service import oauth_service
+    from app.core.redis_client import get_redis
     
     try:
+        # Validate CSRF state
+        redis_client = get_redis()
+        if redis_client:
+            state_key = f"oauth_state:linkedin:{state}"
+            if not redis_client.exists(state_key):
+                raise ValueError("Invalid or expired OAuth state")
+            redis_client.delete(state_key)
+
         # Get user info from LinkedIn
         user_info = await oauth_service.get_linkedin_user_info(code)
         
@@ -877,9 +957,15 @@ async def linkedin_oauth_callback(
         # Update last login
         user.last_login = datetime.now(timezone.utc)
         db.commit()
-        
-        # Return tokens
-        return create_token_response(user)
+
+        token_response = create_token_response(user)
+        fragment = urlencode(
+            {
+                "access_token": token_response.access_token,
+                "refresh_token": token_response.refresh_token,
+            }
+        )
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/oauth/callback#{fragment}")
         
     except ValueError as e:
         logger.error(f"LinkedIn OAuth callback error: {e}")

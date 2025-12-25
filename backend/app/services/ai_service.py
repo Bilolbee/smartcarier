@@ -1019,6 +1019,13 @@ Return ONLY the JSON. No other text."""
         """
         logger.info(f"Generating resume for {job_title} with {years_experience} years experience")
         
+        # Avoid backslashes in f-string expressions (Python restriction)
+        projects_snippet = ""
+        if include_projects:
+            projects_snippet = (
+                '    "projects": [{"name": "Project Name", "description": "Description", "technologies": ["tech1"]}],\n'
+            )
+
         # Build prompt for resume generation
         prompt = f"""Generate a complete professional resume for a candidate applying for the position of {job_title}.
 
@@ -1081,7 +1088,7 @@ OUTPUT FORMAT (JSON):
         "technical": ["technical skills"],
         "soft": ["soft skills"]
     }},
-    {"\"projects\": [{\"name\": \"Project Name\", \"description\": \"Description\", \"technologies\": [\"tech1\"]}]," if include_projects else ''}
+{projects_snippet}
     "certifications": [
         {{
             "name": "Certification Name",

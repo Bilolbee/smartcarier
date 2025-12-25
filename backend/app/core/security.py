@@ -55,7 +55,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Optional, Dict, Union
-from uuid import UUID
+from uuid import UUID, uuid4
 
 # JWT handling
 from jose import jwt, JWTError, ExpiredSignatureError
@@ -64,7 +64,7 @@ from jose import jwt, JWTError, ExpiredSignatureError
 from passlib.context import CryptContext
 
 # Redis for token blacklist (optional, can use in-memory for dev)
-# from redis import Redis
+from app.core.redis_client import get_redis
 
 # Local imports
 from app.config import settings
@@ -140,13 +140,38 @@ class TokenType(str, Enum):
 
 
 # =============================================================================
-# TOKEN BLACKLIST (In-Memory for Development)
+# TOKEN BLACKLIST (In-Memory fallback)
 # =============================================================================
 
 # In production, use Redis or database for token blacklist
 # This allows proper logout by invalidating tokens
 
-_token_blacklist: set = set()
+_token_blacklist_jti: set = set()
+
+
+def _get_token_exp_seconds(token: str) -> int:
+    """
+    Best-effort TTL extraction from JWT (seconds until exp).
+    Returns 0 if missing/invalid.
+    """
+    try:
+        claims = jwt.get_unverified_claims(token)
+        exp = claims.get("exp")
+        if not exp:
+            return 0
+        now = int(datetime.now(timezone.utc).timestamp())
+        return max(0, int(exp) - now)
+    except Exception:
+        return 0
+
+
+def _get_token_jti(token: str) -> Optional[str]:
+    try:
+        claims = jwt.get_unverified_claims(token)
+        jti = claims.get("jti")
+        return str(jti) if jti else None
+    except Exception:
+        return None
 
 
 def blacklist_token(token: str) -> None:
@@ -158,8 +183,31 @@ def blacklist_token(token: str) -> None:
     Args:
         token: JWT token to blacklist
     """
-    _token_blacklist.add(token)
-    logger.info(f"Token blacklisted. Blacklist size: {len(_token_blacklist)}")
+    jti = _get_token_jti(token)
+    if not jti:
+        # fallback: nothing to do, but log
+        logger.warning("Cannot blacklist token without jti")
+        return
+
+    ttl_seconds = _get_token_exp_seconds(token)
+
+    # Prefer Redis in production
+    if settings.TOKEN_BLACKLIST_USE_REDIS:
+        redis_client = get_redis()
+        if redis_client:
+            try:
+                key = f"bl:jti:{jti}"
+                if ttl_seconds > 0:
+                    redis_client.set(key, "1", ex=ttl_seconds)
+                else:
+                    redis_client.set(key, "1")
+                logger.info("Token blacklisted (redis)")
+                return
+            except Exception as e:
+                logger.warning(f"Redis blacklist failed (fallback to memory): {e}")
+
+    _token_blacklist_jti.add(jti)
+    logger.info(f"Token blacklisted (memory). Blacklist size: {len(_token_blacklist_jti)}")
 
 
 def is_token_blacklisted(token: str) -> bool:
@@ -172,7 +220,19 @@ def is_token_blacklisted(token: str) -> bool:
     Returns:
         True if blacklisted, False otherwise
     """
-    return token in _token_blacklist
+    jti = _get_token_jti(token)
+    if not jti:
+        return False
+
+    if settings.TOKEN_BLACKLIST_USE_REDIS:
+        redis_client = get_redis()
+        if redis_client:
+            try:
+                return bool(redis_client.exists(f"bl:jti:{jti}"))
+            except Exception as e:
+                logger.warning(f"Redis blacklist check failed (fallback): {e}")
+
+    return jti in _token_blacklist_jti
 
 
 def clear_expired_from_blacklist() -> None:
@@ -229,6 +289,7 @@ def create_access_token(
         "exp": expire,                  # Expiration
         "iat": datetime.now(timezone.utc),  # Issued at
         "type": TokenType.ACCESS.value,     # Token type
+        "jti": uuid4().hex,                 # Unique token id (for blacklist/logout)
     }
     
     # Add any additional claims
@@ -274,6 +335,7 @@ def create_refresh_token(
         "exp": expire,
         "iat": datetime.now(timezone.utc),
         "type": TokenType.REFRESH.value,
+        "jti": uuid4().hex,
     }
     
     encoded_jwt = jwt.encode(
@@ -439,11 +501,6 @@ def verify_token(
             # Handle expired token
             pass
     """
-    # Check blacklist first (fast rejection)
-    if check_blacklist and is_token_blacklisted(token):
-        logger.warning("Attempted use of blacklisted token")
-        raise TokenBlacklistedError("Token has been revoked")
-    
     try:
         # Decode token
         payload = jwt.decode(
@@ -457,6 +514,7 @@ def verify_token(
         exp = payload.get("exp")
         iat = payload.get("iat")
         token_type = payload.get("type")
+        jti = payload.get("jti")
         
         if not sub:
             raise TokenInvalidError("Token missing subject")
@@ -476,6 +534,26 @@ def verify_token(
             raise TokenTypeMismatchError(
                 f"Expected {expected_type.value} token, got {token_type_enum.value}"
             )
+
+        # Check blacklist after signature verification (avoid trusting unverified claims)
+        if check_blacklist:
+            # If token has jti, check by jti; else fallback to legacy behavior
+            if jti:
+                if settings.TOKEN_BLACKLIST_USE_REDIS:
+                    redis_client = get_redis()
+                    if redis_client:
+                        try:
+                            if redis_client.exists(f"bl:jti:{jti}"):
+                                raise TokenBlacklistedError("Token has been revoked")
+                        except TokenBlacklistedError:
+                            raise
+                        except Exception as e:
+                            logger.warning(f"Redis blacklist check failed: {e}")
+                if jti in _token_blacklist_jti:
+                    raise TokenBlacklistedError("Token has been revoked")
+            else:
+                if is_token_blacklisted(token):
+                    raise TokenBlacklistedError("Token has been revoked")
         
         # Build payload object
         return TokenPayload(

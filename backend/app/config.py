@@ -86,6 +86,23 @@ class Settings(BaseSettings):
     # Development: SQLite
     # Production: postgresql://user:password@host:port/database
     DATABASE_URL: str = "sqlite:///./smartcareer.db"
+
+    # =========================================================================
+    # 🧠 REDIS (Rate limiting, token blacklist, OAuth state)
+    # =========================================================================
+
+    # Enable Redis-backed features in production
+    REDIS_ENABLED: bool = False
+    REDIS_URL: str = "redis://localhost:6379/0"
+
+    # If True and Redis is available, use Redis for rate limiting
+    RATE_LIMIT_USE_REDIS: bool = True
+
+    # If True and Redis is available, use Redis for token blacklist (logout)
+    TOKEN_BLACKLIST_USE_REDIS: bool = True
+
+    # OAuth state TTL (CSRF protection) in seconds
+    OAUTH_STATE_TTL_SECONDS: int = 10 * 60
     
     # =========================================================================
     # 🔐 JWT AUTHENTICATION
@@ -171,6 +188,16 @@ class Settings(BaseSettings):
     
     # OAuth enabled
     OAUTH_ENABLED: bool = False
+
+    # =========================================================================
+    # 💳 PAYMENTS (Stripe)
+    # =========================================================================
+
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+
+    # If True, webhook signature MUST be configured (recommended for production)
+    PAYMENTS_REQUIRE_WEBHOOK_SECRET: bool = True
     
     # =========================================================================
     # 🔗 CORS SETTINGS

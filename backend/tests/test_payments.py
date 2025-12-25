@@ -118,14 +118,16 @@ def test_create_payment_intent_without_auth(client: TestClient):
 
 @pytest.mark.payment
 @pytest.mark.unit
-def test_double_payment_prevention():
+@pytest.mark.asyncio
+async def test_double_payment_prevention():
     """Test that duplicate payment is prevented."""
     from app.services.payment_service import PaymentService
     
     service = PaymentService()
     
     # Create first payment
-    payment1 = service.create_stripe_payment_intent(
+    payment1 = await service.create_stripe_payment_intent(
+        db=None,
         user_id="test-user-1",
         user_email="test@example.com",
         amount=999,
@@ -137,7 +139,8 @@ def test_double_payment_prevention():
     
     # Try to create duplicate payment with same idempotency key
     with pytest.raises(ValueError, match="Payment already processed"):
-        service.create_stripe_payment_intent(
+        await service.create_stripe_payment_intent(
+            db=None,
             user_id="test-user-1",
             user_email="test@example.com",
             amount=999,
@@ -254,14 +257,16 @@ def test_get_pricing(client: TestClient):
 
 @pytest.mark.payment
 @pytest.mark.unit
-def test_payment_log_created():
+@pytest.mark.asyncio
+async def test_payment_log_created():
     """Test that payment attempts are logged."""
     from app.services.payment_service import PaymentService
     
     service = PaymentService()
     
     # Create payment
-    payment = service.create_stripe_payment_intent(
+    payment = await service.create_stripe_payment_intent(
+        db=None,
         user_id="test-user-1",
         user_email="test@example.com",
         amount=999,

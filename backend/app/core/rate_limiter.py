@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException, Request, status
 
 from app.config import settings
+from app.core.redis_client import get_redis
 
 # =============================================================================
 # LOGGING
@@ -207,6 +208,124 @@ rate_limiter = RateLimiter()
 
 
 # =============================================================================
+# REDIS RATE LIMITER (PRODUCTION)
+# =============================================================================
+
+class RedisRateLimiter:
+    """
+    Redis-backed rate limiter + login lockout.
+
+    Implementation details:
+    - Per-window counters using INCR + EXPIRE
+    - Lockout key with TTL
+    """
+
+    def __init__(self):
+        self.redis = get_redis()
+        mode = "redis" if self.redis else "disabled"
+        logger.info(f"RedisRateLimiter initialized ({mode})")
+
+    def _window_key(self, prefix: str, identifier: str, window_seconds: int) -> str:
+        now = int(time.time())
+        bucket = now // window_seconds
+        return f"rl:{prefix}:{identifier}:{bucket}"
+
+    def check_rate_limit(
+        self,
+        identifier: str,
+        max_requests: int,
+        window_seconds: int,
+        key_prefix: str = "api",
+    ) -> Tuple[bool, Optional[int]]:
+        if not self.redis:
+            return True, None
+
+        key = self._window_key(key_prefix, identifier, window_seconds)
+        try:
+            count = int(self.redis.incr(key))
+            # ensure TTL exists (only set on first hit)
+            if count == 1:
+                self.redis.expire(key, window_seconds + 2)
+
+            if count > max_requests:
+                ttl = int(self.redis.ttl(key))
+                retry_after = ttl if ttl > 0 else window_seconds
+                return False, retry_after
+
+            return True, None
+        except Exception as e:
+            logger.warning(f"Redis rate limit failed (fallback allow): {e}")
+            return True, None
+
+    def record_failed_login(
+        self,
+        identifier: str,
+        ip_address: str,
+        max_attempts: int = 5,
+        lockout_minutes: int = 15,
+    ) -> Tuple[bool, Optional[int], int]:
+        if not self.redis:
+            return False, None, max_attempts
+
+        email = identifier.lower()
+        lock_key = f"lock:login:{email}"
+        fail_key = f"fail:login:{email}"
+        lock_seconds = lockout_minutes * 60
+
+        try:
+            # already locked?
+            if self.redis.exists(lock_key):
+                ttl = int(self.redis.ttl(lock_key))
+                return True, ttl if ttl > 0 else lock_seconds, 0
+
+            # increment fail count with TTL window
+            fails = int(self.redis.incr(fail_key))
+            if fails == 1:
+                self.redis.expire(fail_key, lock_seconds)
+
+            remaining = max(0, max_attempts - fails)
+
+            if fails >= max_attempts:
+                # lock account
+                self.redis.set(lock_key, ip_address, ex=lock_seconds)
+                # optional: delete fail counter so it resets after lock
+                self.redis.delete(fail_key)
+                return True, lock_seconds, 0
+
+            return False, None, remaining
+        except Exception as e:
+            logger.warning(f"Redis failed-login tracking failed (fallback): {e}")
+            return False, None, max_attempts
+
+    def clear_failed_logins(self, identifier: str) -> None:
+        if not self.redis:
+            return
+        email = identifier.lower()
+        try:
+            self.redis.delete(f"fail:login:{email}")
+            self.redis.delete(f"lock:login:{email}")
+        except Exception as e:
+            logger.warning(f"Redis clear_failed_logins failed: {e}")
+
+    def is_account_locked(self, identifier: str) -> Tuple[bool, Optional[int]]:
+        if not self.redis:
+            return False, None
+        email = identifier.lower()
+        lock_key = f"lock:login:{email}"
+        try:
+            if not self.redis.exists(lock_key):
+                return False, None
+            ttl = int(self.redis.ttl(lock_key))
+            return True, ttl if ttl > 0 else None
+        except Exception as e:
+            logger.warning(f"Redis is_account_locked failed (fallback): {e}")
+            return False, None
+
+
+redis_rate_limiter = RedisRateLimiter()
+
+
+# =============================================================================
 # FASTAPI DEPENDENCIES
 # =============================================================================
 
@@ -223,13 +342,21 @@ def check_rate_limit_dependency(
     async def dependency(request: Request):
         # Get client IP
         client_ip = request.client.host if request.client else "unknown"
-        
-        # Check rate limit
-        is_allowed, retry_after = rate_limiter.check_rate_limit(
-            identifier=client_ip,
-            max_requests=max_requests,
-            window_seconds=window_seconds
-        )
+
+        # Prefer Redis in production
+        if settings.RATE_LIMIT_USE_REDIS and get_redis():
+            is_allowed, retry_after = redis_rate_limiter.check_rate_limit(
+                identifier=client_ip,
+                max_requests=max_requests,
+                window_seconds=window_seconds,
+                key_prefix="api_ip",
+            )
+        else:
+            is_allowed, retry_after = rate_limiter.check_rate_limit(
+                identifier=client_ip,
+                max_requests=max_requests,
+                window_seconds=window_seconds
+            )
         
         if not is_allowed:
             raise HTTPException(
@@ -248,13 +375,21 @@ def check_login_rate_limit(request: Request):
     Stricter limits to prevent brute-force attacks.
     """
     client_ip = request.client.host if request.client else "unknown"
-    
+
     # 5 login attempts per minute per IP
-    is_allowed, retry_after = rate_limiter.check_rate_limit(
-        identifier=f"login:{client_ip}",
-        max_requests=5,
-        window_seconds=60
-    )
+    if settings.RATE_LIMIT_USE_REDIS and get_redis():
+        is_allowed, retry_after = redis_rate_limiter.check_rate_limit(
+            identifier=client_ip,
+            max_requests=5,
+            window_seconds=60,
+            key_prefix="login_ip",
+        )
+    else:
+        is_allowed, retry_after = rate_limiter.check_rate_limit(
+            identifier=f"login:{client_ip}",
+            max_requests=5,
+            window_seconds=60
+        )
     
     if not is_allowed:
         logger.warning(f"Login rate limit exceeded for IP: {client_ip}")
@@ -276,6 +411,13 @@ def record_failed_login(email: str, ip_address: str) -> Tuple[bool, Optional[int
     Returns:
         Tuple of (is_locked, unlock_after_seconds, remaining_attempts)
     """
+    if settings.RATE_LIMIT_USE_REDIS and get_redis():
+        return redis_rate_limiter.record_failed_login(
+            identifier=email.lower(),
+            ip_address=ip_address,
+            max_attempts=5,
+            lockout_minutes=15,
+        )
     return rate_limiter.record_failed_login(
         identifier=email.lower(),
         ip_address=ip_address,
@@ -286,11 +428,16 @@ def record_failed_login(email: str, ip_address: str) -> Tuple[bool, Optional[int
 
 def clear_failed_logins(email: str):
     """Clear failed login attempts after successful login."""
+    if settings.RATE_LIMIT_USE_REDIS and get_redis():
+        redis_rate_limiter.clear_failed_logins(email.lower())
+        return
     rate_limiter.clear_failed_logins(email.lower())
 
 
 def is_account_locked(email: str) -> Tuple[bool, Optional[int]]:
     """Check if account is locked due to failed login attempts."""
+    if settings.RATE_LIMIT_USE_REDIS and get_redis():
+        return redis_rate_limiter.is_account_locked(email.lower())
     return rate_limiter.is_account_locked(email.lower())
 
 

@@ -137,6 +137,13 @@ from app.models.application import (
     ApplicationStatus,      # Enum: pending, reviewing, interview, etc.
 )
 
+from app.models.payment import (
+    Payment,               # Payment audit trail
+    PaymentProvider,        # STRIPE
+    PaymentStatus,          # PENDING, COMPLETED, FAILED, ...
+    SubscriptionTier,       # FREE, PREMIUM, ENTERPRISE
+)
+
 # =============================================================================
 # EXPORT ALL (for `from app.models import *`)
 # =============================================================================
@@ -175,6 +182,14 @@ __all__ = [
     # -------------------------------------------------------------------------
     "Application",         # Job application model
     "ApplicationStatus",   # PENDING, REVIEWING, INTERVIEW, etc.
+
+    # -------------------------------------------------------------------------
+    # Payments
+    # -------------------------------------------------------------------------
+    "Payment",
+    "PaymentProvider",
+    "PaymentStatus",
+    "SubscriptionTier",
 ]
 
 # =============================================================================
